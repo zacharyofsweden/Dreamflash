@@ -96,12 +96,12 @@ machine; the rest can be done anywhere.
 
 ### Phase 2 — make it run at all
 
-- [ ] Split the build: separate `ROCM backend` / `GPU arch` / `unified-memory`
-      / `discrete-memory` axes. Today `make rocm` == `make strix-halo` with
-      `gfx1151` hardcoded (`Makefile:57,161`). Build-only patch, no behavior change.
-- [ ] Audit every unified-memory assumption listed in `docs/FINDINGS.md` §1 and
-      make the memory-sizing constants configurable (the 16 GiB free-reserve and
-      8 GiB managed-KV reserve are both larger than the target's whole VRAM).
+- [x] Split the build: separate `ROCM backend` / `GPU arch` / `unified-memory`
+      / `discrete-memory` axes. Parametric `Makefile` created for `gfx1100`,
+      `gfx1101`, `gfx1030` alongside APU targets.
+- [x] Audit every unified-memory assumption listed in `docs/FINDINGS.md` §1 and
+      make the memory-sizing constants configurable (`include/ds4_discrete_config.h`
+      and `tools/discrete_config/config_generator.py`).
 - [ ] **[MEASURE]** Baseline attempts at 512 / 2048 / 4096 / 8192 context.
       **Record complete failures as valid evidence** — a clean OOM with a log is
       a result, not a setback.
@@ -152,12 +152,17 @@ Inherited from the brief, and they are what make the result mean anything:
 ## Repo layout
 
 ```
-docs/FINDINGS.md          upstream analysis — READ FIRST
-tools/roofline/model.py   model geometry, transcribed from ds4.c
-tools/roofline/roofline.py  feasibility calculator
-tools/trace_replay/       offline trace simulator & replacement policies
-tests/test_roofline.py    15 roofline consistency tests
-tests/test_trace_replay.py 7 trace replay unit tests
+docs/FINDINGS.md               upstream analysis — READ FIRST
+include/ds4_discrete_config.h  discrete memory constants & C API
+include/expert_io.h            asynchronous NVMe I/O interface
+Makefile                       parametric build configuration
+tools/roofline/model.py        model geometry, transcribed from ds4.c
+tools/roofline/roofline.py     feasibility calculator
+tools/trace_replay/            offline trace simulator & replacement policies
+tools/discrete_config/         discrete GPU runtime config generator
+tests/test_roofline.py         15 roofline consistency tests
+tests/test_trace_replay.py      7 trace replay unit tests
+tests/test_discrete_config.py  2 discrete configuration tests
 ```
 
 Everything else in the brief's deliverable list is still to be created; the
