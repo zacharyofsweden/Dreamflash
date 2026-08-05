@@ -18,6 +18,8 @@ work plan that makes that tractable — and honest about where it stops.
 ```bash
 python tools/roofline/roofline.py      # the feasibility math
 python tests/test_roofline.py          # 15 consistency tests
+python tools/trace_replay/replay.py    # offline simulator policy comparison
+python tests/test_trace_replay.py      # 7 trace replay unit tests
 ```
 
 Then read **[docs/FINDINGS.md](docs/FINDINGS.md)**. It is the highest-value
@@ -85,7 +87,7 @@ machine; the rest can be done anywhere.
 
 ### Phase 1 — the offline simulator *(no GPU needed — highest value per hour)*
 
-- [ ] `tools/trace_replay/` — replay traces against pluggable policies (LRU,
+- [x] `tools/trace_replay/` — replay traces against pluggable policies (LRU,
       LFU, LRU-K, recency-frequency hybrid, cost-aware, Belady oracle).
       Report hit rate, SSD bytes, PCIe bytes, evictions, wasted prefetch.
       **Done when:** Belady gives the upper bound and LRU the lower, and the
@@ -153,7 +155,9 @@ Inherited from the brief, and they are what make the result mean anything:
 docs/FINDINGS.md          upstream analysis — READ FIRST
 tools/roofline/model.py   model geometry, transcribed from ds4.c
 tools/roofline/roofline.py  feasibility calculator
-tests/test_roofline.py    15 consistency tests
+tools/trace_replay/       offline trace simulator & replacement policies
+tests/test_roofline.py    15 roofline consistency tests
+tests/test_trace_replay.py 7 trace replay unit tests
 ```
 
 Everything else in the brief's deliverable list is still to be created; the
