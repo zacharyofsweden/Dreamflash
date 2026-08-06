@@ -128,9 +128,25 @@ class SpeculativeEngine:
         cost_model: Optional[CostModel] = None,
         zipf_s: float = 1.2,
         policy_factory: Optional[Callable[[], ReplacementPolicy]] = None,
+        draft_branches: int = 1,
     ) -> None:
         self.draft_k = draft_k
         self.acceptance_prob = acceptance_prob
+        # Tree-structured drafting (Medusa/EAGLE style). With draft_branches=1 this
+        # is a linear chain: one candidate per position, and the first rejection ends
+        # the pass. With b>1 the drafter proposes b alternatives at each position and
+        # the target verifies the whole tree in a single pass, so the position
+        # advances if ANY branch matches.
+        #
+        # The reason this is worth modelling here specifically: the extra branches are
+        # nearly free in I/O terms. Expert reads are deduplicated across the whole
+        # tree, and sibling candidates at the same position route to mostly the same
+        # experts (that is what expert_locality_overlap describes), so widening the
+        # tree buys acceptance without buying much SSD traffic. In a compute-bound
+        # deployment the tradeoff is the opposite way round.
+        if draft_branches < 1:
+            raise ValueError("draft_branches must be >= 1")
+        self.draft_branches = draft_branches
         # Routing skew for the base token of each pass. Matches the default in
         # trace_replay/trace.py on purpose: this engine previously drew base experts
         # UNIFORMLY, so the two tools in this repo disagreed about the access
@@ -240,37 +256,45 @@ class SpeculativeEngine:
                 base_pass_experts.append(self._sample_experts())
 
             for d_i in range(self.draft_k):
-                accesses = []
-                for l_i in range(self.shape.n_layer):
-                    prev_layer_experts = base_pass_experts[l_i]
-                    cur_layer_experts: List[int] = []
+                position_accepted = False
 
-                    for exp in prev_layer_experts:
-                        if self.rng.random() < self.expert_locality_overlap:
-                            cur_layer_experts.append(exp)
-                        else:
-                            new_exp = self.rng.randint(0, self.shape.n_expert - 1)
-                            while new_exp in cur_layer_experts:
+                # Siblings at this tree position. All of them are verified, so all of
+                # their expert reads are charged, whether or not they are accepted.
+                for b_i in range(self.draft_branches):
+                    accesses = []
+                    for l_i in range(self.shape.n_layer):
+                        prev_layer_experts = base_pass_experts[l_i]
+                        cur_layer_experts: List[int] = []
+
+                        for exp in prev_layer_experts:
+                            if self.rng.random() < self.expert_locality_overlap:
+                                cur_layer_experts.append(exp)
+                            else:
                                 new_exp = self.rng.randint(0, self.shape.n_expert - 1)
-                            cur_layer_experts.append(new_exp)
+                                while new_exp in cur_layer_experts:
+                                    new_exp = self.rng.randint(0, self.shape.n_expert - 1)
+                                cur_layer_experts.append(new_exp)
 
-                    for exp in cur_layer_experts:
-                        accesses.append((l_i, exp))
+                        for exp in cur_layer_experts:
+                            accesses.append((l_i, exp))
 
-                accepted = self.rng.random() < self.acceptance_prob
-                k_candidates.append(
-                    CandidateToken(
-                        token_idx=step_idx,
-                        draft_id=d_i,
-                        accesses=accesses,
-                        is_accepted=accepted,
+                    accepted = self.rng.random() < self.acceptance_prob
+                    position_accepted = position_accepted or accepted
+                    k_candidates.append(
+                        CandidateToken(
+                            token_idx=step_idx,
+                            draft_id=d_i * self.draft_branches + b_i,
+                            accesses=accesses,
+                            is_accepted=accepted,
+                        )
                     )
-                )
 
-                if accepted and accepted_in_pass == d_i:
+                if position_accepted and accepted_in_pass == d_i:
+                    # At least one sibling matched, so the accepted path extends.
                     accepted_in_pass += 1
                 else:
-                    # First rejection ends the pass; later candidates are discarded.
+                    # No branch at this position matched: the tree is cut here and
+                    # everything deeper is discarded.
                     break
 
             if measuring:
@@ -303,7 +327,7 @@ class SpeculativeEngine:
                 stats.ssd_experts += pass_ssd
 
             serialized, ideal = self.cost_model.pass_time_seconds(
-                draft_k=len(k_candidates),
+                draft_k=len(k_candidates),  # every verified node costs draft compute
                 vram_experts=pass_vram,
                 host_experts=pass_host,
                 ssd_experts=pass_ssd,

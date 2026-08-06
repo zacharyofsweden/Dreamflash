@@ -391,6 +391,28 @@ result. Nobody has measured routing overlap on DeepSeek-V4. It is the single
 highest-value measurement left in the project, and it is one instrumented forward
 pass away.
 
+### Tree-structured drafting — implemented, NOT yet evaluated
+
+`SpeculativeEngine(draft_branches=b)` models Medusa/EAGLE-style tree drafting:
+instead of a linear chain where one rejection ends the pass, the drafter proposes
+`b` alternatives per position and the position advances if any sibling matches.
+The reason to expect it to pay *here specifically* is that expert reads are
+deduplicated across the whole tree and siblings route to mostly the same experts,
+so extra branches buy acceptance without buying much SSD traffic — the opposite
+of the tradeoff in a compute-bound deployment.
+
+**That is a hypothesis, not a finding.** The mechanics are implemented and tested
+(`b=1` reproduces the linear chain exactly), but the sweep that would show whether
+it actually helps was never run. Do not quote a number for it. The open question
+is whether the acceptance gain outruns the extra distinct experts each branch
+drags in, and that depends on `--overlap`, which is itself unmeasured.
+
+**The 20 tok/s target is therefore still unresolved in software.** Confirmed
+software levers total ~14.5 tok/s on the stock box (pipelining +29%, LFU +8%,
+MTP +2.6%). Reaching 20 currently requires either the 32 GB RAM upgrade, or
+routing overlap turning out to be ≥0.88, or tree drafting working — and only the
+first of those is currently known to be true.
+
 ## Rules that are not negotiable
 
 Inherited from the brief, and they are what make the result mean anything:

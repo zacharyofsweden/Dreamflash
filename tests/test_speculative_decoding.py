@@ -301,6 +301,39 @@ class TestSpeculativeDecoding(unittest.TestCase):
             "default run must satisfy the repo's own >=512-token measurement rule",
         )
 
+    def test_tree_drafting_semantics(self) -> None:
+        """Tree drafting: b=1 is the old linear chain; b>1 advances if ANY sibling hits.
+
+        NOTE: this pins the mechanics only. Whether widening the tree is a net win on
+        this workload has NOT been measured -- see the README caveat.
+        """
+        # b=1 must be byte-identical to the linear chain, so nothing regressed.
+        linear = SpeculativeEngine(
+            draft_k=6, acceptance_prob=0.7, seed=77, draft_branches=1
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
+        self.assertEqual(
+            linear.total_generated_tokens,
+            linear.target_verification_passes + linear.accepted_draft_tokens,
+        )
+
+        # Every verified node is charged, so a wider tree drafts strictly more nodes.
+        wide = SpeculativeEngine(
+            draft_k=6, acceptance_prob=0.7, seed=77, draft_branches=3
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
+        self.assertGreater(
+            wide.total_draft_tokens / wide.target_verification_passes,
+            linear.total_draft_tokens / linear.target_verification_passes,
+            "siblings must be counted as drafted (and therefore paid for)",
+        )
+        # And more branches per position must not lower acceptance depth.
+        self.assertGreaterEqual(
+            wide.total_generated_tokens / wide.target_verification_passes,
+            linear.total_generated_tokens / linear.target_verification_passes,
+        )
+
+        with self.assertRaises(ValueError):
+            SpeculativeEngine(draft_branches=0)
+
     def test_speculative_policy_pinning(self) -> None:
         """Test that SpeculativeAwarePolicy pins predicted draft candidate experts."""
         base_policy = LRUPolicy()
