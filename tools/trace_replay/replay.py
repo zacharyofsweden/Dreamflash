@@ -72,12 +72,14 @@ def print_report(
     host_cap: int,
     total_experts: int,
     total_accesses: int,
+    trace_source: str = "unknown",
 ) -> str:
     lines = []
     a = lines.append
 
     a("=" * 80)
     a("OFFLINE TRACE REPLAY POLICY COMPARISON")
+    a(f"Trace source: {trace_source}")
     a(f"Total experts in model: {total_experts:,} | Total trace accesses: {total_accesses:,}")
     a(f"VRAM Capacity: {vram_cap:,} experts | Host RAM Capacity: {host_cap:,} experts")
     a(f"Combined Capacity: {vram_cap + host_cap:,} / {total_experts:,} experts "
@@ -96,8 +98,13 @@ def print_report(
         a(f"{name:<25} | {vram_pct:9.2f}% | {comb_pct:14.2f}% | {r['ssd_gb']:9.2f} | {r['pcie_gb']:9.2f}")
 
     a("-" * 80)
-    a(f"Belady Upper Bound: {belady_hit_rate * 100:.2f}% | LRU Lower Bound: {lru_hit_rate * 100:.2f}%")
+    a(f"Belady (see caveat): {belady_hit_rate * 100:.2f}% | LRU baseline: {lru_hit_rate * 100:.2f}%")
     a(f"Headroom (Belady - LRU): {gap:+.2f}% percentage points")
+    if host_cap > 0:
+        a("CAVEAT: Belady is optimal only for a single-tier cache. This simulation is two-tier")
+        a("and applies Belady independently within VRAM and within host RAM, so it is a strong")
+        a("heuristic here, NOT a proven upper bound -- another policy can beat it. LRU is a")
+        a("conventional baseline, not a lower bound (CostAware scores below it).")
     a("=" * 80)
 
     return "\n".join(lines)
@@ -127,7 +134,15 @@ def main() -> None:
 
     if args.trace_file:
         trace = Trace.load_jsonl(args.trace_file)
+        trace_source = f"REAL trace file: {args.trace_file}"
     else:
+        trace_source = (
+            f"SYNTHETIC -- generated, not measured "
+            f"(distribution={args.distribution}"
+            + (f", zipf_s={args.zipf_s}" if args.distribution == "zipf" else "")
+            + "). Hit rates below are a property of this generator, "
+            "NOT of DeepSeek-V4-Flash."
+        )
         trace = generate_synthetic_trace(
             n_tokens=args.tokens,
             n_layers=FLASH.n_layer,
@@ -144,6 +159,7 @@ def main() -> None:
         host_cap,
         FLASH.total_routed_experts,
         trace.total_accesses(),
+        trace_source=trace_source,
     )
     print(report_text)
 
@@ -153,6 +169,7 @@ def main() -> None:
         with open(out_p, "w", encoding="utf-8") as f:
             json.dump(
                 {
+                    "trace_source": trace_source,
                     "vram_capacity": vram_cap,
                     "host_capacity": host_cap,
                     "total_accesses": trace.total_accesses(),

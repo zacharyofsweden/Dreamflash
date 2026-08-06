@@ -187,13 +187,18 @@ class CostAwarePolicy(ReplacementPolicy):
         self.last_used[key] = step
 
     def select_eviction(self, candidates: Collection[Tuple[int, int]], step: int) -> Tuple[int, int]:
-        def eviction_cost(k: Tuple[int, int]) -> float:
+        def retention_value(k: Tuple[int, int]) -> float:
+            # Score on AGE (how long since last use), never on the absolute timestamp:
+            # multiplying a raw step counter by a weight makes the score depend on where
+            # step 0 sits rather than on the recency gap, and collapses to 0 at step 0.
             layer_idx, _ = k
-            recency = self.last_used.get(k, -1)
+            age = step - self.last_used.get(k, -1)
             layer_weight = 1.0 + self.early_boost * ((self.total_layers - layer_idx) / self.total_layers)
-            return recency * layer_weight
+            # Higher weight => more valuable to keep => discount its apparent age.
+            return age / layer_weight
 
-        return min(candidates, key=eviction_cost)
+        # Evict the entry with the greatest weight-adjusted age.
+        return max(candidates, key=retention_value)
 
     def on_evict(self, key: Tuple[int, int]) -> None:
         self.last_used.pop(key, None)
