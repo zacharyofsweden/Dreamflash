@@ -37,6 +37,18 @@ class ReplacementPolicy(ABC):
         """Notification that key was evicted from cache."""
         pass
 
+    def should_admit(
+        self, key: Tuple[int, int], victim: Tuple[int, int], step: int
+    ) -> bool:
+        """Decide whether `key` is worth displacing `victim` from the tier.
+
+        Default True: every policy without an opinion behaves as before, admitting
+        unconditionally. Overriding this is how a policy becomes scan-resistant --
+        see TinyLFUAdmissionPolicy for why that matters when a single pass touches
+        more distinct experts than the tier can hold.
+        """
+        return True
+
     def reset(self) -> None:
         """Reset policy state for a new simulation run."""
         pass
@@ -223,6 +235,7 @@ class BeladyPolicy(ReplacementPolicy):
         return "Belady-Oracle"
 
     def set_future_accesses(self, future_accesses: List[Tuple[int, int]]) -> None:
+        self._future_set = True
         self.future_map.clear()
         for step, key in enumerate(future_accesses):
             self.future_map[key].append(step)
@@ -234,6 +247,16 @@ class BeladyPolicy(ReplacementPolicy):
                 q.popleft()
 
     def select_eviction(self, candidates: Collection[Tuple[int, int]], step: int) -> Tuple[int, int]:
+        if not getattr(self, "_future_set", False):
+            # Without the future map every key looks "never reused again" and Belady
+            # silently degrades into an arbitrary choice that scores WORSE than LRU --
+            # while still being labelled an oracle. Fail loudly instead. Belady is
+            # inherently offline; it cannot be used on an incremental access stream.
+            raise RuntimeError(
+                "BeladyPolicy requires set_future_accesses() before use. It is an "
+                "offline oracle and cannot serve an online/incremental access stream."
+            )
+
         def next_access_step(k: Tuple[int, int]) -> int:
             q = self.future_map.get(k)
             if q:
@@ -249,4 +272,70 @@ class BeladyPolicy(ReplacementPolicy):
         pass
 
     def reset(self) -> None:
+        self._future_set = False
         self.future_map.clear()
+
+
+class TinyLFUAdmissionPolicy(ReplacementPolicy):
+    """Frequency-gated admission over a base eviction policy (a TinyLFU variant).
+
+    The problem this solves: at the target configuration a single K=5 verification
+    pass touches ~456 distinct experts against a 339-expert VRAM tier. Under any
+    pure recency policy the pass sweeps the tier clean every time, so the hot
+    experts that Zipf routing makes worth keeping are evicted by one-off experts
+    that will not be seen again. The tier thrashes by construction and contributes
+    almost nothing (~23 hits per pass under LRU).
+
+    The fix is admission control rather than a smarter eviction order: when the tier
+    is full, only displace the victim if the newcomer has been seen MORE often than
+    the victim. One-off experts then stream through the lower tier without
+    disturbing residency, while genuinely hot experts still earn their way in.
+
+    Frequency is counted with periodic halving (the "aging" step in TinyLFU), so an
+    expert that was hot early cannot hold a slot forever -- without this, frequency
+    policies calcify around whatever appeared first.
+    """
+
+    def __init__(
+        self,
+        base_policy: Optional[ReplacementPolicy] = None,
+        aging_period: int = 100_000,
+    ) -> None:
+        self.base = base_policy if base_policy is not None else LRUPolicy()
+        self.freq: Dict[Tuple[int, int], int] = collections.defaultdict(int)
+        self.aging_period = aging_period
+        self._accesses = 0
+
+    def name(self) -> str:
+        return f"TinyLFU-admit({self.base.name()})"
+
+    def on_access(self, key: Tuple[int, int], step: int) -> None:
+        self.freq[key] += 1
+        self._accesses += 1
+        if self.aging_period > 0 and self._accesses % self.aging_period == 0:
+            # Halve every counter so recent behaviour dominates old behaviour.
+            for k in list(self.freq):
+                self.freq[k] >>= 1
+                if self.freq[k] == 0:
+                    del self.freq[k]
+        self.base.on_access(key, step)
+
+    def select_eviction(
+        self, candidates: Collection[Tuple[int, int]], step: int
+    ) -> Tuple[int, int]:
+        return self.base.select_eviction(candidates, step)
+
+    def should_admit(
+        self, key: Tuple[int, int], victim: Tuple[int, int], step: int
+    ) -> bool:
+        # Strictly greater: ties favour the incumbent, since displacing costs a
+        # transfer and an equally-hot victim is no improvement.
+        return self.freq.get(key, 0) > self.freq.get(victim, 0)
+
+    def on_evict(self, key: Tuple[int, int]) -> None:
+        self.base.on_evict(key)
+
+    def reset(self) -> None:
+        self.freq.clear()
+        self._accesses = 0
+        self.base.reset()

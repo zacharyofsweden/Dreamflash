@@ -18,8 +18,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "trace_replay"))
 
 from cost_model import CostModel
 from draft_simulator import SpeculativeEngine
+from policy import LFUPolicy, LRUKPolicy, LRUPolicy, TinyLFUAdmissionPolicy
 from model import FLASH
 from roofline import Machine, plan_budget
+
+
+POLICIES = {
+    "lru": LRUPolicy,
+    "lfu": LFUPolicy,
+    "lru2": lambda: LRUKPolicy(k=2),
+    "tinylfu": lambda: TinyLFUAdmissionPolicy(LFUPolicy()),
+}
 
 
 def evaluate_speculative_matrix(
@@ -27,17 +36,22 @@ def evaluate_speculative_matrix(
     target_tokens: int = 200,
     vram_capacity: int = 339,
     host_capacity: int = 1744,
+    policy: str = "lfu",
+    pipeline: bool = False,
 ) -> str:
     lines = []
     a = lines.append
 
-    cost = CostModel(ssd_read_bps=ssd_gbps * 1e9)
+    cost = CostModel(ssd_read_bps=ssd_gbps * 1e9, pipeline_transfer=pipeline)
+    policy_factory = POLICIES[policy]
     baseline = cost.cold_baseline_tok_s(FLASH.routed_bytes_per_token(), FLASH.n_layer)
 
     a("=" * 96)
     a("DREAMFLASH SPECULATIVE DECODING EVALUATION (MoE Batch Verification)")
     a(f"Target Model: {FLASH.name} | SSD: {ssd_gbps:.1f} GB/s | PCIe: {cost.pcie_bps/1e9:.1f} GB/s"
       f" | VRAM: {cost.vram_bps/1e9:.0f} GB/s")
+    a(f"Policy: {policy_factory().name()} | transfer: "
+      f"{'PIPELINED (SSD/PCIe double-buffered)' if pipeline else 'serialized'}")
     a(f"Cache: {vram_capacity:,} VRAM + {host_capacity:,} host experts "
       f"({(vram_capacity + host_capacity) / FLASH.total_routed_experts * 100:.1f}% of model)")
     a(f"Non-speculative cold baseline under the same cost model: {baseline:.2f} tok/s")
@@ -58,8 +72,9 @@ def evaluate_speculative_matrix(
                 draft_k=k,
                 acceptance_prob=alpha,
                 shape=FLASH,
-                ssd_gbps=ssd_gbps,
                 seed=42 + k * 10,
+                cost_model=cost,
+                policy_factory=policy_factory,
             )
             stats = engine.run_simulation(
                 target_token_count=target_tokens,
@@ -94,7 +109,7 @@ def evaluate_speculative_matrix(
     a("  * 'serial' charges transfer and compute back to back; 'ideal' assumes transfer")
     a("    hides perfectly behind compute. Real hardware is between. Quote the serial")
     a("    end -- overlap efficiency here is unmeasured.")
-    a("  * Hit% is an OUTPUT (a real LRU cache over the access stream), not an input.")
+    a("  * Hit% is an OUTPUT (a real cache under the policy named above), not an input.")
     a("    It is still only as meaningful as the SYNTHETIC access stream that produced")
     a("    it: cross-candidate expert overlap is injected by a hardcoded 0.80 constant,")
     a("    and no real DeepSeek-V4 routing trace exists in this repo.")
@@ -120,6 +135,16 @@ def main() -> None:
     parser.add_argument(
         "--host-experts", type=int, default=None, help="Override host cache capacity"
     )
+    parser.add_argument(
+        "--policy", choices=sorted(POLICIES), default="lfu",
+        help="Cache replacement policy (default lfu; lru is swept clean every pass)",
+    )
+    parser.add_argument(
+        "--pipeline", action="store_true",
+        help="Model SSD->host and host->VRAM as double-buffered rather than serial. "
+             "This is the Phase 3 streaming path and is NOT yet implemented -- "
+             "enabling it is a claim about code that does not exist.",
+    )
     args = parser.parse_args()
 
     # Derive capacities from the byte budget, exactly as replay.py does.
@@ -144,6 +169,8 @@ def main() -> None:
             target_tokens=args.target_tokens,
             vram_capacity=vram_cap,
             host_capacity=host_cap,
+            policy=args.policy,
+            pipeline=args.pipeline,
         )
     )
 

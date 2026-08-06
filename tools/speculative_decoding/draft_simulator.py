@@ -19,13 +19,13 @@ import random
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "trace_replay"))
 
 from cost_model import CostModel
 from model import FLASH, Shape
-from policy import LRUPolicy
+from policy import LFUPolicy, LRUPolicy, ReplacementPolicy
 from simulator import CacheSimulator, CacheTier, SimulationStats
 
 
@@ -127,6 +127,7 @@ class SpeculativeEngine:
         seed: int = 42,
         cost_model: Optional[CostModel] = None,
         zipf_s: float = 1.2,
+        policy_factory: Optional[Callable[[], ReplacementPolicy]] = None,
     ) -> None:
         self.draft_k = draft_k
         self.acceptance_prob = acceptance_prob
@@ -147,6 +148,16 @@ class SpeculativeEngine:
         self.expert_locality_overlap = expert_locality_overlap
         self.shape = shape
         self.rng = random.Random(seed)
+
+        # A factory, not an instance: policies carry state, so each run needs a fresh
+        # one or residency history leaks between runs.
+        #
+        # LFU rather than LRU by default. A verification pass touches ~456 distinct
+        # experts against a 339-expert VRAM tier, so any pure-recency policy is swept
+        # clean every pass and the tier contributes almost nothing (~23 hits/pass vs
+        # ~105 under LFU). Since VRAM hits are the only ones that avoid PCIe entirely,
+        # that difference is worth ~8% end to end.
+        self.policy_factory = policy_factory or LFUPolicy
 
         # `ssd_gbps` is a convenience override for the common case. Applying it
         # unconditionally would silently discard the ssd_read_bps of a caller-supplied
@@ -188,7 +199,7 @@ class SpeculativeEngine:
             vram_capacity=vram_capacity,
             host_capacity=host_capacity,
             shape=self.shape,
-            policy=LRUPolicy(),
+            policy=self.policy_factory(),
         )
         cache_stats = SimulationStats(bytes_per_expert=stats.bytes_per_expert)
 

@@ -65,6 +65,20 @@ class CostModel:
     draft_model_bytes: float = 1.0 * GIB
     """Draft model weights, read once per drafted token. A ~1 B model at Q8."""
 
+    pipeline_transfer: bool = False
+    """Whether the SSD->host and host->VRAM stages are double-buffered.
+
+    False charges them serially: read an expert off SSD, then send it over PCIe,
+    then start the next. True charges max(ssd, pcie), which is what a real streaming
+    path achieves by DMAing expert N over the bus while expert N+1 is still being
+    read off disk. This is the Phase 3 "three-tier streaming path" and it is the
+    single largest gain available in software: the two stages are 68% and 26% of the
+    pass, so overlapping them removes the smaller one almost entirely.
+
+    Left False by default because nothing here has been built or measured yet.
+    Turning it on is a claim about an implementation that does not exist.
+    """
+
     def pass_time_seconds(
         self,
         draft_k: int,
@@ -98,7 +112,10 @@ class CostModel:
         # reading its own weights. This is the cost speculation must earn back.
         t_draft = draft_k * (self.draft_model_bytes / self.vram_bps) if self.vram_bps > 0 else 0.0
 
-        transfer = t_ssd + t_pcie
+        # Double-buffered, the two transfer stages run concurrently and the slower
+        # one sets the pace; serially, they add. The pipeline still has to fill and
+        # drain, but at ~450 experts per pass that edge effect is negligible.
+        transfer = max(t_ssd, t_pcie) if self.pipeline_transfer else (t_ssd + t_pcie)
         compute = t_vram + t_launch + t_draft
 
         serialized = transfer + compute

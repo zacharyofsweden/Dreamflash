@@ -28,6 +28,8 @@ class SimulationStats:
 
     vram_evictions: int = 0
     host_evictions: int = 0
+    vram_admission_rejections: int = 0
+    """Times a newcomer was judged not worth displacing the VRAM victim."""
 
     bytes_per_expert: float = 0.0
 
@@ -150,6 +152,16 @@ class CacheSimulator:
                 evict_key = self.policy.select_eviction(self.vram_cache, step)
             else:
                 evict_key = next(iter(self.vram_cache))
+
+            # Admission control: a scan-resistant policy may decline to displace the
+            # victim, leaving the newcomer in the lower tier instead. Without this,
+            # a pass whose working set exceeds the tier evicts everything worth
+            # keeping on every pass.
+            if self.policy and not self.policy.should_admit(key, evict_key, step):
+                stats.vram_admission_rejections += 1
+                if self.host_capacity > 0:
+                    self._insert_into_host(key, step, stats)
+                return
 
             self.vram_cache.remove(evict_key)
             stats.vram_evictions += 1

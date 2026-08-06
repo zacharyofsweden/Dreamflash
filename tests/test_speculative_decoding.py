@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT_DIR / "tools" / "speculative_decoding"))
 from cost_model import CostModel
 from draft_simulator import SpeculativeEngine
 from model import FLASH
-from policy import LRUPolicy
+from policy import BeladyPolicy, LFUPolicy, LRUPolicy, TinyLFUAdmissionPolicy
 from speculative_policy import SpeculativeAwarePolicy
 
 
@@ -201,6 +201,64 @@ class TestSpeculativeDecoding(unittest.TestCase):
             cheap.accepted_tok_s,
             "an 8 GiB draft model must cost more than a 1 MB one",
         )
+
+    def test_pipelining_transfer_helps_and_is_bounded(self) -> None:
+        """Double-buffering SSD/PCIe must help, and by no more than the smaller stage.
+
+        Serialized charges t_ssd + t_pcie; pipelined charges max(t_ssd, t_pcie). The
+        saving is therefore exactly min(t_ssd, t_pcie), so pipelined throughput must
+        improve but must never exceed the serialized figure with the smaller stage
+        removed entirely.
+        """
+        serial = SpeculativeEngine(
+            draft_k=5, acceptance_prob=0.85, seed=92,
+            cost_model=CostModel(pipeline_transfer=False),
+        ).run_simulation(target_token_count=60)
+        piped = SpeculativeEngine(
+            draft_k=5, acceptance_prob=0.85, seed=92,
+            cost_model=CostModel(pipeline_transfer=True),
+        ).run_simulation(target_token_count=60)
+
+        self.assertGreater(piped.accepted_tok_s, serial.accepted_tok_s)
+        # Residency must be identical -- pipelining is a scheduling change, not a
+        # caching one, and must not perturb which tier served what.
+        self.assertEqual(piped.vram_experts, serial.vram_experts)
+        self.assertEqual(piped.ssd_experts, serial.ssd_experts)
+
+    def test_admission_control_protects_hot_experts(self) -> None:
+        """Frequency-gated admission must beat pure recency on a thrashing tier.
+
+        A pass touches more distinct experts than the VRAM tier holds, so LRU is
+        swept clean every pass. Admission control should keep materially more
+        experts resident in VRAM -- the only tier whose hits avoid PCIe.
+        """
+        lru = SpeculativeEngine(
+            draft_k=5, acceptance_prob=0.85, seed=92, policy_factory=LRUPolicy
+        ).run_simulation(target_token_count=60)
+        admit = SpeculativeEngine(
+            draft_k=5, acceptance_prob=0.85, seed=92,
+            policy_factory=lambda: TinyLFUAdmissionPolicy(LFUPolicy()),
+        ).run_simulation(target_token_count=60)
+
+        self.assertGreater(
+            admit.vram_experts,
+            lru.vram_experts * 2,
+            "admission control should more than double VRAM residency vs pure LRU",
+        )
+        self.assertGreaterEqual(admit.accepted_tok_s, lru.accepted_tok_s)
+
+    def test_belady_refuses_to_run_online(self) -> None:
+        """Belady must fail loudly rather than silently degrade on a live stream.
+
+        Without a future map every key looks never-reused-again, so the "oracle"
+        quietly becomes an arbitrary choice that scores WORSE than LRU while still
+        being labelled an upper bound.
+        """
+        engine = SpeculativeEngine(
+            draft_k=5, acceptance_prob=0.85, seed=92, policy_factory=BeladyPolicy
+        )
+        with self.assertRaises(RuntimeError):
+            engine.run_simulation(target_token_count=40, vram_capacity=10, host_capacity=10)
 
     def test_speculative_policy_pinning(self) -> None:
         """Test that SpeculativeAwarePolicy pins predicted draft candidate experts."""

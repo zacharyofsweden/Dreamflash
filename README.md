@@ -171,6 +171,11 @@ machine; the rest can be done anywhere.
       replace.**
 - [ ] Host-RAM warm cache. Justified by finding #3: converts a 6 GB/s SSD read
       into a 24 GB/s PCIe transfer.
+- [ ] **Double-buffer the SSD→host and host→VRAM stages.** Highest-value item in
+      this phase: worth ~29%, more than every replacement-policy improvement
+      combined. Read expert N+1 off disk while expert N is crossing the bus.
+      Model it with `run_speculative.py --pipeline`. **Done when:** measured
+      transfer time per pass approaches `max(t_ssd, t_pcie)` rather than their sum.
 - [ ] Per-expert telemetry: VRAM hit / RAM hit / SSD miss / prefetch hit /
       prefetch waste / bytes / latencies / GPU wait.
 
@@ -270,6 +275,41 @@ construction and contributes only ~23 hits per pass.
 purchase.** All of the above rests on placeholder bandwidths and a synthetic
 access stream — the ranking of levers is more trustworthy than the absolute
 numbers, and Phase 0 is what turns either into evidence.
+
+### Best achievable in software, same hardware, same quantization
+
+Cumulative, measured at K=5 / 85% acceptance:
+
+| Change | tok/s (serial) | tok/s (ideal) |
+|---|---:|---:|
+| Baseline (LRU, serialized transfer) | 9.19 | 9.78 |
+| + LFU replacement | 9.93 | 10.63 |
+| + TinyLFU admission control | 9.95 | 10.65 |
+| **+ pipelined SSD→host→VRAM (double-buffered)** | **12.83** | **14.02** |
+| + K tuned to 8 | 13.07 | 14.22 |
+
+**~13 tok/s serialized, ~14 with good overlap — the 10 tok/s north star clears
+with room to spare.** The first two rows are already the defaults; the third is
+`--policy tinylfu`; the fourth is `--pipeline` and is *not implemented yet*.
+
+Two things are worth taking from this:
+
+1. **Pipelining the two transfer stages is the single biggest software lever
+   (+29%), and it dwarfs all replacement-policy work combined (+8%).** SSD and
+   PCIe are 68% and 26% of the pass; double-buffering removes the smaller of them
+   almost entirely. Phase 3 should be built around this, not around policy.
+2. **Replacement-policy work is close to exhausted.** LFU, LRU-2,
+   recency/frequency hybrid, TinyLFU admission, and a statically pinned hot set
+   all land within 39–41% hit rate and 9.9–10.1 tok/s. The spread across
+   *policies* is under 2%, while the spread across *access distributions* (the
+   `zipf_s` sweep) is 58 points. Measuring real routing skew is worth far more
+   than any further policy tuning.
+
+Not pursued, and why: a more aggressive quant cuts SSD and PCIe proportionally
+and is by far the largest remaining lever, but it trades against quality and the
+rules below bar it from counting in the default path. Reclaiming VRAM from the
+`kv_bytes_per_token` placeholder could enlarge the VRAM tier, but that number is
+a guess — measure it before spending it.
 
 ## Rules that are not negotiable
 
