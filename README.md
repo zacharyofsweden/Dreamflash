@@ -37,9 +37,13 @@ backed by `file:line` citations into upstream in `docs/FINDINGS.md`.
    than the entire target VRAM. The gap is architectural.
 2. **`ds4_ssd.c` contains no I/O engine.** Only arg parsing and cache-size
    arithmetic. The NVMe read path is new construction.
-3. **The SSD is the bottleneck; PCIe is not.** 18.3 GB/s of demand at 10 tok/s
-   vs ~24 GB/s of PCIe 4.0 x16. This inverts the priority order in the original
-   brief — build the host-RAM cache tier, skip the elaborate PCIe pipelining.
+3. **The SSD is the bottleneck; PCIe is not — *at 10 tok/s*.** 18.3 GB/s of
+   demand at 10 tok/s vs ~24 GB/s of PCIe 4.0 x16. This inverts the priority
+   order in the original brief — build the host-RAM cache tier, skip the
+   elaborate PCIe pipelining. **This holds only near the 10 tok/s north star.**
+   PCIe carries every host-tier hit *and* every SSD miss, so raising the hit rate
+   moves traffic onto the bus rather than off it. Past roughly 29 tok/s on this
+   box, PCIe binds and the SSD stops mattering — see "Reaching 30 tok/s" below.
 4. **Cold-cache ceiling is 3.29 tok/s.** Milestones M4 (1) and M5 (3) need no
    cache at all. M6+ is *purely* a cache-hit-rate problem.
 5. **The best hardware upgrade is a faster/second NVMe, not a bigger GPU.**
@@ -215,6 +219,57 @@ machine; the rest can be done anywhere.
 > expert reads to the cost), which is the repo's stated non-negotiable.
 
 ---
+
+## Reaching 30 tok/s
+
+Measured with `tools/speculative_decoding/` at K=5, 85% acceptance, on the
+placeholder bandwidths. Where one pass costs 498 ms, it splits:
+
+| Term | Per pass | Share |
+|---|---:|---:|
+| SSD (misses) | 337.9 ms | 67.9% |
+| PCIe (host hits + misses) | 127.8 ms | 25.7% |
+| VRAM (weights + experts) | 21.3 ms | 4.3% |
+| Draft model | 10.7 ms | 2.2% |
+| Kernel launch | 0.2 ms | 0.0% |
+
+Compute is 6% of the problem. This is an I/O problem end to end, which is
+consistent with findings #3 and #6.
+
+**The stock box cannot reach 30.** Holding the hardware fixed (12 GiB VRAM,
+16 GiB RAM, one 6 GB/s NVMe, PCIe 4.0 x16):
+
+| Configuration | tok/s |
+|---|---:|
+| As configured | 9.19 |
+| Perfect replacement policy (unbounded host tier) | 12.46 |
+| **+ SSD cost eliminated entirely (perfect prefetch)** | **28.84** |
+
+That last row is a hard ceiling: every expert already resident in host RAM and
+the SSD free. It is still under 30, because PCIe and the ~6.9 GiB of non-routed
+weights remain. **No amount of policy, prefetch, or cache work reaches 30 tok/s
+on this machine.** Anything claiming otherwise has changed an assumption.
+
+What does reach it:
+
+| Change | tok/s |
+|---|---:|
+| 2x NVMe RAID0 (12 GB/s) | 13.94 |
+| 4x NVMe RAID0 (24 GB/s) | 18.79 |
+| 4x NVMe + PCIe 5.0 x16 (48 GB/s) | 25.52 |
+| 4x NVMe + PCIe 5.0 + 24 GB card (VRAM tier 2,000 experts) | **32.46** |
+
+Note the ordering: SSD bandwidth is the largest single lever until roughly
+19 tok/s, after which PCIe binds and further SSD spend buys nothing. Raising the
+*VRAM* hit rate is the only lever that removes PCIe traffic rather than
+relocating it, and that needs a bigger card — at the stock 339-expert VRAM tier
+a single K=5 pass touches ~456 distinct experts, so the VRAM tier thrashes by
+construction and contributes only ~23 hits per pass.
+
+**Honest summary: 10 tok/s is a plausible target on this box; 30 is a hardware
+purchase.** All of the above rests on placeholder bandwidths and a synthetic
+access stream — the ranking of levers is more trustworthy than the absolute
+numbers, and Phase 0 is what turns either into evidence.
 
 ## Rules that are not negotiable
 

@@ -132,6 +132,45 @@ class TestSpeculativeDecoding(unittest.TestCase):
             f"tok/s must stay below the VRAM weight-streaming ceiling ({ceiling:.1f})",
         )
 
+    def test_cost_model_parameters_actually_take_effect(self) -> None:
+        """A supplied CostModel must not be silently overridden or mutated.
+
+        The regression this guards: the engine unconditionally wrote its `ssd_gbps`
+        default over the cost model's ssd_read_bps, so a caller-supplied SSD
+        bandwidth had NO effect -- an infinitely fast SSD produced byte-identical
+        throughput to a 6 GB/s one, which is impossible when SSD reads are most of
+        the wall clock.
+        """
+        slow_cm = CostModel(ssd_read_bps=6.0e9)
+        fast_cm = CostModel(ssd_read_bps=600.0e9)
+
+        slow = SpeculativeEngine(
+            draft_k=4, acceptance_prob=0.8, seed=31, cost_model=slow_cm
+        ).run_simulation(target_token_count=40)
+        fast = SpeculativeEngine(
+            draft_k=4, acceptance_prob=0.8, seed=31, cost_model=fast_cm
+        ).run_simulation(target_token_count=40)
+
+        self.assertGreater(
+            fast.accepted_tok_s,
+            slow.accepted_tok_s * 1.5,
+            "a 100x faster SSD must materially change throughput",
+        )
+        # And the caller's object must come back untouched.
+        self.assertEqual(slow_cm.ssd_read_bps, 6.0e9)
+        self.assertEqual(fast_cm.ssd_read_bps, 600.0e9)
+
+        # PCIe must bite too: it carries every host hit and every SSD miss.
+        wide = SpeculativeEngine(
+            draft_k=4, acceptance_prob=0.8, seed=31,
+            cost_model=CostModel(ssd_read_bps=600.0e9, pcie_bps=240.0e9),
+        ).run_simulation(target_token_count=40)
+        self.assertGreater(
+            wide.accepted_tok_s,
+            fast.accepted_tok_s,
+            "with SSD cost removed, PCIe becomes the binding constraint",
+        )
+
     def test_serialized_never_beats_ideal_overlap(self) -> None:
         """The reported range must be ordered: serialized is the pessimistic end."""
         engine = SpeculativeEngine(draft_k=3, acceptance_prob=0.7, seed=17)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
@@ -123,7 +123,7 @@ class SpeculativeEngine:
         acceptance_prob: float = 0.65,
         expert_locality_overlap: float = 0.80,
         shape: Shape = FLASH,
-        ssd_gbps: float = 6.0,
+        ssd_gbps: Optional[float] = None,
         seed: int = 42,
         cost_model: Optional[CostModel] = None,
         zipf_s: float = 1.2,
@@ -148,8 +148,14 @@ class SpeculativeEngine:
         self.shape = shape
         self.rng = random.Random(seed)
 
-        self.cost_model = cost_model or CostModel()
-        self.cost_model.ssd_read_bps = ssd_gbps * 1e9
+        # `ssd_gbps` is a convenience override for the common case. Applying it
+        # unconditionally would silently discard the ssd_read_bps of a caller-supplied
+        # cost model -- which made SSD bandwidth appear to have no effect at all.
+        # replace() rather than assignment so we never mutate the caller's object.
+        base = cost_model if cost_model is not None else CostModel()
+        self.cost_model = (
+            replace(base, ssd_read_bps=ssd_gbps * 1e9) if ssd_gbps is not None else base
+        )
 
     def _sample_experts(self) -> List[int]:
         """Draw n_expert_used distinct experts under the Zipf popularity weights."""
