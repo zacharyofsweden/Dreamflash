@@ -8,7 +8,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Ensure parent path is in sys.path for local imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -33,15 +33,17 @@ def run_comparison(
     trace: Trace,
     vram_capacity: int,
     host_capacity: int,
+    policies: Optional[List[ReplacementPolicy]] = None,
 ) -> Dict[str, dict]:
-    policies: List[ReplacementPolicy] = [
-        LRUPolicy(),
-        LFUPolicy(),
-        LRUKPolicy(k=2),
-        HybridRecencyFrequencyPolicy(),
-        CostAwarePolicy(total_layers=FLASH.n_layer),
-        BeladyPolicy(),
-    ]
+    if policies is None:
+        policies = [
+            LRUPolicy(),
+            LFUPolicy(),
+            LRUKPolicy(k=2),
+            HybridRecencyFrequencyPolicy(),
+            CostAwarePolicy(total_layers=FLASH.n_layer),
+            BeladyPolicy(),
+        ]
 
     results = {}
     for policy in policies:
@@ -110,6 +112,78 @@ def print_report(
     return "\n".join(lines)
 
 
+def sweep_zipf_report(
+    tokens: int,
+    vram_cap: int,
+    host_cap: int,
+    exponents: List[float],
+) -> str:
+    """Report hit rate across routing-skew exponents.
+
+    The single most misleading thing this tool can do is print one hit rate from one
+    arbitrary `zipf_s` and let it be read as a property of DeepSeek-V4-Flash. Nothing
+    in this repo justifies any particular exponent, and the answer swings from
+    "hopeless" to "trivial" across the plausible range. Until a real routing trace
+    exists (Phase 0), the range IS the finding.
+    """
+    lines = []
+    a = lines.append
+
+    a("=" * 80)
+    a("ROUTING-SKEW SENSITIVITY SWEEP (synthetic)")
+    a(f"VRAM {vram_cap:,} + host {host_cap:,} experts | {tokens} tokens per point")
+    a("=" * 80)
+    a(f"{'zipf_s':<10} | {'LRU hit%':<12} | {'Belady hit%':<14} | {'10 tok/s viable?'}")
+    a("-" * 80)
+
+    # From roofline: 10 tok/s needs a 67.1% hit rate at 6 GB/s.
+    required = 0.671
+    rows = []
+
+    for s in exponents:
+        trace = generate_synthetic_trace(
+            n_tokens=tokens,
+            n_layers=FLASH.n_layer,
+            n_experts=FLASH.n_expert,
+            n_expert_used=FLASH.n_expert_used,
+            distribution="zipf",
+            zipf_s=s,
+        )
+        # Only the bracketing policies are needed per point; running all six here
+        # multiplies the sweep cost for numbers the sweep does not report.
+        results = run_comparison(
+            trace, vram_cap, host_cap, policies=[LRUPolicy(), BeladyPolicy()]
+        )
+        lru = results.get("LRU", {}).get("combined_hit_rate", 0.0)
+        belady = results.get("Belady-Oracle", {}).get("combined_hit_rate", 0.0)
+        verdict = "YES" if lru >= required else ("oracle only" if belady >= required else "no")
+        rows.append((s, lru, belady))
+        a(f"{s:<10.2f} | {lru*100:11.2f}% | {belady*100:13.2f}% | {verdict}")
+
+    a("-" * 80)
+    lo = min(r[1] for r in rows)
+    hi = max(r[1] for r in rows)
+    a(f"LRU hit rate spans {lo*100:.1f}% to {hi*100:.1f}% across this range "
+      f"({(hi-lo)*100:.1f} points).")
+    a(f"10 tok/s at 6 GB/s requires {required*100:.1f}%.")
+
+    default_row = next((r for r in rows if abs(r[0] - 1.2) < 1e-9), None)
+    if default_row is not None and abs(default_row[1] - required) < 0.05:
+        a("")
+        a(f"NOTE: the default exponent (1.2) yields {default_row[1]*100:.2f}%, within a")
+        a(f"whisker of the {required*100:.1f}% the target requires -- the one value in this")
+        a("range that makes the north star look barely achievable. Treat a default that")
+        a("lands exactly on the threshold as a number to re-derive, not to rely on.")
+    a("")
+    a("The exponent is an ASSUMPTION with no citation anywhere in this repo, and the")
+    a("verdict on the north-star target flips inside the plausible range. Treat the")
+    a("span above as the honest state of knowledge until a measured routing trace")
+    a("exists -- that measurement, not more policy work, is the critical path.")
+    a("=" * 80)
+
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=int, default=200, help="Number of synthetic tokens")
@@ -120,6 +194,12 @@ def main() -> None:
     parser.add_argument("--zipf-s", type=float, default=1.2)
     parser.add_argument("--trace-file", type=str, default=None, help="Path to JSONL trace file")
     parser.add_argument("--output-json", type=str, default=None, help="Save summary to JSON file")
+    parser.add_argument(
+        "--sweep-zipf",
+        action="store_true",
+        help="Sweep the routing-skew exponent and report the RANGE of hit rates rather "
+        "than a single point estimate from an uncited constant",
+    )
     args = parser.parse_args()
 
     m = Machine(
@@ -131,6 +211,15 @@ def main() -> None:
     per_expert = FLASH.bytes_per_routed_expert()
     vram_cap = max(0, int(budget.vram_expert_cache // per_expert))
     host_cap = max(0, int(budget.host_expert_cache // per_expert))
+
+    if args.sweep_zipf:
+        print(sweep_zipf_report(
+            tokens=args.tokens,
+            vram_cap=vram_cap,
+            host_cap=host_cap,
+            exponents=[0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8],
+        ))
+        return
 
     if args.trace_file:
         trace = Trace.load_jsonl(args.trace_file)

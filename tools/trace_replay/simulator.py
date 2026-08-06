@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Set, Tuple, Optional
 
 from model import FLASH, Shape
 from policy import BeladyPolicy, ReplacementPolicy
 from trace import Trace
+
+
+class CacheTier(Enum):
+    """Which tier served an access. Determines what bandwidth the bytes cross."""
+    VRAM = "vram"   # already resident; no transfer
+    HOST = "host"   # crosses PCIe
+    SSD = "ssd"     # crosses SSD, then PCIe
 
 
 @dataclass
@@ -80,38 +88,55 @@ class CacheSimulator:
         self.host_cache.clear()
 
         for step, access in enumerate(access_list):
-            key = access.key
-            stats.total_accesses += 1
-
-            if key in self.vram_cache:
-                # Tier 1 HIT
-                stats.vram_hits += 1
-                if self.policy:
-                    self.policy.on_access(key, step)
-
-            elif key in self.host_cache:
-                # Tier 2 HIT (Host RAM)
-                stats.host_hits += 1
-                if self.policy:
-                    self.policy.on_access(key, step)
-
-                # Move from Host RAM to VRAM
-                self.host_cache.remove(key)
-                self._insert_into_vram(key, step, stats)
-
-            else:
-                # SSD MISS
-                stats.ssd_misses += 1
-                if self.policy:
-                    self.policy.on_access(key, step)
-
-                # Fetch into VRAM (or Host RAM if VRAM capacity is 0)
-                if self.vram_capacity > 0:
-                    self._insert_into_vram(key, step, stats)
-                elif self.host_capacity > 0:
-                    self._insert_into_host(key, step, stats)
+            self.access(access.key, step, stats)
 
         return stats
+
+    def access(
+        self, key: Tuple[int, int], step: int, stats: SimulationStats
+    ) -> "CacheTier":
+        """Serve one expert access against the live cache, updating residency and stats.
+
+        Exposed separately from run() so callers that generate accesses incrementally
+        (the speculative engine) can drive the same cache rather than approximating
+        it with an independent hit-rate parameter.
+        """
+        stats.total_accesses += 1
+
+        if key in self.vram_cache:
+            # Tier 1 HIT
+            stats.vram_hits += 1
+            if self.policy:
+                self.policy.on_access(key, step)
+            return CacheTier.VRAM
+
+        if key in self.host_cache:
+            # Tier 2 HIT (Host RAM)
+            stats.host_hits += 1
+            if self.policy:
+                self.policy.on_access(key, step)
+
+            # Move from Host RAM to VRAM
+            self.host_cache.remove(key)
+            self._insert_into_vram(key, step, stats)
+            return CacheTier.HOST
+
+        # SSD MISS
+        stats.ssd_misses += 1
+        if self.policy:
+            self.policy.on_access(key, step)
+
+        # Fetch into VRAM (or Host RAM if VRAM capacity is 0)
+        if self.vram_capacity > 0:
+            self._insert_into_vram(key, step, stats)
+        elif self.host_capacity > 0:
+            self._insert_into_host(key, step, stats)
+        return CacheTier.SSD
+
+    def reset(self) -> None:
+        """Drop all residency. Policy state is left to the caller."""
+        self.vram_cache.clear()
+        self.host_cache.clear()
 
     def _insert_into_vram(
         self, key: Tuple[int, int], step: int, stats: SimulationStats

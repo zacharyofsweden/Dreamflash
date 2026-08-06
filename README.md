@@ -63,8 +63,19 @@ treating any of these numbers as load-bearing.
 - **Every hit rate produced by `tools/trace_replay/`.** There is no real trace in
   this repo. The default is synthetic i.i.d. Zipf with `zipf_s=1.2`, an uncited
   constant, applying the same expert ranking to all 43 layers with no temporal or
-  prompt structure. At `zipf_s=0.6` LRU gets 28%; at 1.8 it gets 84%. These
-  numbers characterize the generator, not the model.
+  prompt structure. These numbers characterize the generator, not the model — run
+  `python tools/trace_replay/replay.py --sweep-zipf` to see the range: LRU spans
+  **29.1% at `s=0.6` to 87.0% at `s=1.8`**, a 58-point swing, and the verdict on
+  the north star flips from "no" to "yes" between `s=1.0` and `s=1.2`. Until
+  Phase 0 produces a measured trace, **the range is the finding**; any single hit
+  rate quoted from this repo is a choice of exponent, not a property of
+  DeepSeek-V4-Flash.
+
+  Worth noticing: the default `s=1.2` yields 67.29% against the 67.1% the target
+  requires. Of every exponent in the plausible range, the default is the one that
+  makes 10 tok/s look *just* achievable. That may be coincidence, but a default
+  landing on the threshold to two decimal places is a number to re-derive rather
+  than rely on.
 - **Every throughput figure from `tools/speculative_decoding/`.** See Phase 4.
 - **Everything in `results/hardware/`.** See Phase 0.
 
@@ -166,21 +177,40 @@ machine; the rest can be done anywhere.
       throughput** — see the caveat below before quoting any number it prints.
 - [x] Speculative-aware cache replacement policy (`SpeculativeAwarePolicy` in `tools/speculative_decoding/speculative_policy.py`).
 
-> **The "32.2 tok/s" figure previously claimed here was wrong and has been
-> withdrawn.** Three things were true of it. (1) It was misattributed: it needs
-> a 75% cache hit rate **and** an 85% acceptance probability, and the README
-> quoted only the first. The default run (70% hit rate) reaches 30 tok/s in
-> *none* of its 24 rows. (2) It is circular. The simulator models wall-clock
-> time as SSD read time for cache-missed experts and nothing else — no compute,
-> no PCIe, no attention/KV, no draft-model cost, no verification cost — so
-> throughput reduces to roughly `accepted_tokens / (1 - hit_rate)`, and the hit
-> rate is a free input. Set it to 0.97 and the tool reports 227 tok/s. (3) The
-> "deduplication across draft trees" it demonstrates is an
-> `expert_locality_overlap = 0.80` constant injected by its own generator, and
-> misses are an i.i.d. coin flip per expert per pass — there is no cache state
-> in it. Treat its output as an I/O-bound-only upper bound and nothing more.
+> **The "32.2 tok/s" figure previously claimed here was withdrawn, and the
+> engine behind it has been rebuilt.** The original number was misattributed (it
+> needed an unstated 85% acceptance probability on top of the 75% hit rate) and
+> circular: wall-clock time was modelled as SSD reads for cache-missed experts
+> and nothing else, so throughput reduced to `accepted_tokens / (1 - hit_rate)`
+> with the hit rate as a free input. At 0.97 it reported 227 tok/s. There was
+> also no cache in it — misses were an i.i.d. coin flip per expert per pass.
 >
-> What the engine *does* get right: the numerator is genuinely accepted
+> What it does now:
+> - **Hit rate is an output, not an input.** Expert reads are served against the
+>   same two-tier LRU cache `trace_replay` uses, so the hit rate emerges from
+>   capacity and access pattern. `--cache-hit-rate` is gone; capacities come from
+>   `plan_budget()`.
+> - **Wall clock is charged properly** (`cost_model.py`): VRAM streaming of the
+>   ~6.9 GiB non-routed weights, PCIe for host-tier hits, SSD for misses,
+>   per-layer kernel launch, and the draft model's own K sequential passes. Every
+>   bandwidth is still a labeled placeholder.
+> - **It reports a range, not a point.** Overlap efficiency is unmeasured, so it
+>   prints a serialized (nothing overlaps) and an ideal (transfer fully hidden)
+>   figure. Quote the serialized end.
+> - **Speedup is measured against the same cost model**, not against SSD-only
+>   cold decode, so it isolates speculation instead of crediting it with the cache.
+>
+> Current output at the default 18.9% capacity: **6–9 tok/s serialized**, at an
+> emergent 37–54% hit rate. Two results worth noting: nothing in the matrix
+> reaches 30 tok/s, and hit rate *falls* as K grows (54% at K=1 to 37% at K=6)
+> because wider draft trees touch more distinct experts. The old fixed-input
+> model could not express either.
+>
+> What still limits it: the expert access stream remains synthetic — the
+> cross-candidate overlap is a hardcoded 0.80 — and acceptance probability is
+> still an input, since it is a property of a draft model that does not exist yet.
+>
+> What the engine always got right: the numerator is genuinely accepted
 > user-visible tokens (it stops at first rejection, and charges rejected drafts'
 > expert reads to the cost), which is the repo's stated non-negotiable.
 
