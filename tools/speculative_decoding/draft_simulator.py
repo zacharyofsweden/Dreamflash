@@ -138,12 +138,16 @@ class SpeculativeEngine:
         # the target verifies the whole tree in a single pass, so the position
         # advances if ANY branch matches.
         #
-        # The reason this is worth modelling here specifically: the extra branches are
-        # nearly free in I/O terms. Expert reads are deduplicated across the whole
-        # tree, and sibling candidates at the same position route to mostly the same
-        # experts (that is what expert_locality_overlap describes), so widening the
-        # tree buys acceptance without buying much SSD traffic. In a compute-bound
-        # deployment the tradeoff is the opposite way round.
+        # MEASURED RESULT: on this workload widening the tree LOSES, badly. At the
+        # assumed 0.80 overlap, b=2 drops throughput from 14.84 to 9.23 tok/s. The
+        # appeal was that siblings should share experts and so cost little extra I/O,
+        # but they do not: each sibling keeps 80% of the base token's experts and
+        # replaces a DIFFERENT 20%, so distinct reads per pass grow faster (+87%)
+        # than accepted tokens (+41%). Only at >=0.99 overlap does b=2 win.
+        #
+        # Kept because it is the honest way to record that negative result, and
+        # because the conclusion flips if real routing overlap turns out to be very
+        # high. Leave at 1 unless you have measured overlap and it is extreme.
         if draft_branches < 1:
             raise ValueError("draft_branches must be >= 1")
         self.draft_branches = draft_branches

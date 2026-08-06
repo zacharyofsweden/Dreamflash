@@ -391,7 +391,7 @@ result. Nobody has measured routing overlap on DeepSeek-V4. It is the single
 highest-value measurement left in the project, and it is one instrumented forward
 pass away.
 
-### Tree-structured drafting — implemented, NOT yet evaluated
+### Tree-structured drafting — evaluated, and it LOSES
 
 `SpeculativeEngine(draft_branches=b)` models Medusa/EAGLE-style tree drafting:
 instead of a linear chain where one rejection ends the pass, the drafter proposes
@@ -401,17 +401,57 @@ deduplicated across the whole tree and siblings route to mostly the same experts
 so extra branches buy acceptance without buying much SSD traffic — the opposite
 of the tradeoff in a compute-bound deployment.
 
-**That is a hypothesis, not a finding.** The mechanics are implemented and tested
-(`b=1` reproduces the linear chain exactly), but the sweep that would show whether
-it actually helps was never run. Do not quote a number for it. The open question
-is whether the acceptance gain outruns the extra distinct experts each branch
-drags in, and that depends on `--overlap`, which is itself unmeasured.
+**That hypothesis is wrong. Measured, tree drafting makes things worse**, and by a
+lot — do not implement it:
 
-**The 20 tok/s target is therefore still unresolved in software.** Confirmed
-software levers total ~14.5 tok/s on the stock box (pipelining +29%, LFU +8%,
-MTP +2.6%). Reaching 20 currently requires either the 32 GB RAM upgrade, or
-routing overlap turning out to be ≥0.88, or tree drafting working — and only the
-first of those is currently known to be true.
+| K=8 | b=1 | b=2 | b=3 | b=4 |
+|---|---:|---:|---:|---:|
+| tok/s | **14.84** | 9.23 | 6.67 | 5.20 |
+| tokens/pass | 5.83 | 8.21 | 8.84 | 8.80 |
+| distinct experts/pass | 529 | 989 | 1402 | 1745 |
+
+Acceptance does improve as predicted (5.83 → 8.21 tokens per pass, +41%), but
+distinct expert reads grow far faster (529 → 989, +87%), and on an I/O-bound
+machine the second term wins. Siblings are *not* nearly-free: each one keeps 80%
+of the base token's experts but replaces a *different* 20%, so every branch drags
+in its own fresh set of misses.
+
+It only becomes a win at implausible overlap:
+
+| overlap | b=1 | b=2 | b=3 |
+|---:|---:|---:|---:|
+| 0.80 | **14.84** | 9.23 | 6.67 |
+| 0.90 | **22.95** | 16.35 | 11.90 |
+| 0.95 | **31.61** | 26.62 | 20.79 |
+| 0.99 | 48.50 | **55.30** | 51.38 |
+
+Tree drafting needs siblings to route almost identically (≥0.99) before the
+acceptance gain covers the extra I/O. This is the reverse of the compute-bound
+case it was designed for, and it is a good illustration of why techniques from
+GPU-resident inference do not transfer to expert streaming unexamined.
+
+### Software is exhausted at ~15 tok/s. What decides 20
+
+Everything else tried moves little. Draft acceptance 0.85 → 0.95 is worth +7%
+(14.84 → 15.84). Fine-tuning K around its optimum is flat (14.4–16.1 across
+K=6…14). The best confirmed software stack — pipelined + TinyLFU + MTP + K=10 +
+α=0.90 — reaches **15.28 tok/s** on the stock 16 GB box.
+
+So the 20 tok/s question reduces to exactly one unmeasured number:
+
+| routing overlap | tok/s | 20? |
+|---:|---:|---|
+| 0.80 (assumed) | 15.28 | no |
+| 0.84 | 17.48 | no |
+| **0.86** | **20.18** | **YES** |
+| 0.88 | 21.00 | YES |
+| 0.90 | 25.47 | YES |
+
+**If measured adjacent-token routing overlap is ≥0.86, 20 tok/s needs no hardware
+at all. Below that, it needs the 32 GB RAM upgrade (~$60), which reaches 20.15
+regardless of overlap.** Those are the only two paths; nothing else in software
+gets there. Measure the overlap before spending anything — it is one instrumented
+forward pass, and it decides a purchase.
 
 ## Rules that are not negotiable
 
