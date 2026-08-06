@@ -129,6 +129,14 @@ machine; the rest can be done anywhere.
       long-doc, tool-use). **Done when:** you can state the measured hit rate at
       18.9% capacity under LRU. *This single number decides whether 10 tok/s is
       a plan or a fantasy.*
+- [ ] **Adjacent-token routing overlap.** From the same trace, measure what
+      fraction of a token's top-6 experts are also selected by the next token, per
+      layer. This sets how many *distinct* experts a speculative verification pass
+      must fetch, and it is the most powerful single parameter in the whole model:
+      0.80 → 0.90 is worth **+55%**, and it also decides the optimal draft width
+      (at 0.70, K barely matters; at 0.90, wider is much better). It is currently
+      a guess (`--overlap`, default 0.80). **Done when:** you can state the
+      measured overlap and re-run `run_speculative.py --overlap <measured>`.
 
 ### Phase 1 — the offline simulator *(no GPU needed — highest value per hour)*
 
@@ -352,6 +360,36 @@ And both require pipelining, which is **not implemented**. Without it, 32 GB RAM
 gives 12–15 tok/s across the whole skew range. The order of work is therefore:
 build the double-buffered streaming path first, then buy RAM. Buying RAM without
 the streaming path buys almost nothing.
+
+### On MTP as the drafter
+
+DeepSeek ships a Multi-Token Prediction head intended exactly for this. Adopt it —
+it is free and it is the right design — but do not expect much here: **it is worth
+about +2.6%** (14.47 → 14.84 tok/s). MTP's saving is that it shares the target's
+trunk instead of running separate draft weights, i.e. it saves *compute*. Compute
+is 6% of a pass on this box. In a normal compute-bound deployment MTP is a large
+win; against expert streaming it is rounding error.
+
+The parameter that *does* matter is easy to confuse with it. `--overlap` is not a
+property of the drafter at all — it is how much the **target's own routing** agrees
+between adjacent token positions, which sets how many distinct experts a pass must
+fetch:
+
+| overlap | tok/s | distinct experts/pass | SSD GB/pass |
+|---:|---:|---:|---:|
+| 0.80 (assumed) | 14.47 | 529 | 2.21 |
+| 0.85 | 17.05 | 442 | 1.68 |
+| 0.90 | 22.08 | 381 | 1.28 |
+| 0.95 | 29.97 | 319 | 0.87 |
+
+It also decides the optimal draft width — at 0.70 the choice of K is worth almost
+nothing, at 0.90 wider windows keep paying (K=16 → 24.03). **So K cannot be tuned
+before overlap is measured**, and it is now a Phase 0 item.
+
+Note what this table is: a sensitivity analysis of a guessed constant, not a
+result. Nobody has measured routing overlap on DeepSeek-V4. It is the single
+highest-value measurement left in the project, and it is one instrumented forward
+pass away.
 
 ## Rules that are not negotiable
 

@@ -39,11 +39,14 @@ def evaluate_speculative_matrix(
     host_capacity: int = 1744,
     policy: str = "lfu",
     pipeline: bool = False,
+    overlap: float = 0.80,
+    draft_bytes_gib: float = 1.0,
 ) -> str:
     lines = []
     a = lines.append
 
-    cost = CostModel(ssd_read_bps=ssd_gbps * 1e9, pipeline_transfer=pipeline)
+    cost = CostModel(ssd_read_bps=ssd_gbps * 1e9, pipeline_transfer=pipeline,
+                     draft_model_bytes=draft_bytes_gib * (1024 ** 3))
     policy_factory = POLICIES[policy]
     baseline = cost.cold_baseline_tok_s(FLASH.routed_bytes_per_token(), FLASH.n_layer)
 
@@ -57,6 +60,7 @@ def evaluate_speculative_matrix(
       f"({(vram_capacity + host_capacity) / FLASH.total_routed_experts * 100:.1f}% of model)")
     a(f"Non-speculative cold baseline under the same cost model: {baseline:.2f} tok/s")
     a(f"Measured over {target_tokens} accepted tokens after a {warmup_tokens}-token warm-up")
+    a(f"Adjacent-token expert overlap: {overlap:.2f} (ASSUMED -- dominates every number below)")
     a("ASSUMED -- NOT MEASURED. Every bandwidth above is a placeholder; the expert")
     a("access stream is synthetic. See the caveats below the table.")
     a("=" * 96)
@@ -75,6 +79,7 @@ def evaluate_speculative_matrix(
                 acceptance_prob=alpha,
                 shape=FLASH,
                 seed=42 + k * 10,
+                expert_locality_overlap=overlap,
                 cost_model=cost,
                 policy_factory=policy_factory,
             )
@@ -114,8 +119,12 @@ def evaluate_speculative_matrix(
     a("    end -- overlap efficiency here is unmeasured.")
     a("  * Hit% is an OUTPUT (a real cache under the policy named above), not an input.")
     a("    It is still only as meaningful as the SYNTHETIC access stream that produced")
-    a("    it: cross-candidate expert overlap is injected by a hardcoded 0.80 constant,")
-    a("    and no real DeepSeek-V4 routing trace exists in this repo.")
+    a("    it, and no real DeepSeek-V4 routing trace exists in this repo.")
+    a(f"  * --overlap ({overlap:.2f}) dominates everything here: it sets how many DISTINCT")
+    a("    experts a pass must fetch, and 0.80 -> 0.90 is worth +55%. It also decides the")
+    a("    optimal K (at 0.70 the draft width barely matters; at 0.90 wider is much")
+    a("    better). It is a property of the target model's routing on adjacent tokens,")
+    a("    it is currently a guess, and it is the highest-value thing left to measure.")
     a("  * 'vs base' compares against non-speculative cold decode under this SAME cost")
     a("    model, so it isolates speculation rather than crediting it with the cache.")
     a("  * Acceptance probability remains an input. It is a property of the draft model")
@@ -140,6 +149,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--host-experts", type=int, default=None, help="Override host cache capacity"
+    )
+    parser.add_argument(
+        "--overlap", type=float, default=0.80,
+        help="Fraction of experts shared between adjacent token positions in a pass. "
+             "A property of the target model's routing, NOT of the drafter, and the "
+             "single most load-bearing unmeasured number here: 0.80 -> 0.90 is worth "
+             "+55%%. Measure it before trusting any figure this tool prints.",
+    )
+    parser.add_argument(
+        "--draft-bytes-gib", type=float, default=1.0,
+        help="Draft model weights read per drafted token. Use ~0.15 for an MTP head "
+             "that shares the target's trunk rather than a separate draft model.",
     )
     parser.add_argument(
         "--policy", choices=sorted(POLICIES), default="lfu",
@@ -178,6 +199,8 @@ def main() -> None:
             host_capacity=host_cap,
             policy=args.policy,
             pipeline=args.pipeline,
+            overlap=args.overlap,
+            draft_bytes_gib=args.draft_bytes_gib,
         )
     )
 
