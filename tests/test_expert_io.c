@@ -99,6 +99,9 @@ static void test_short_read_is_visible(void) {
 
     int rc = expert_io_submit(ctx, &req);
     CHECK(rc == 0, "submit past EOF should still succeed");
+    if (!req.is_completed) {
+        expert_io_wait(ctx, &req, 1000);
+    }
     CHECK(req.is_completed == 1, "request should be marked complete");
     /* The regression this guards: a short read used to be indistinguishable from a
      * full one, because the API had no way to report the transfer count at all. */

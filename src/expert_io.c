@@ -167,19 +167,31 @@ int expert_io_submit(expert_io_context_t *ctx, expert_io_request_t *req) {
         return 0;
     }
 
-    if (GetLastError() == ERROR_IO_PENDING) {
+    DWORD err = GetLastError();
+    if (err == ERROR_IO_PENDING) {
         /* Still in flight. The buffer must not be touched until expert_io_wait(). */
         return 0;
     }
 
-    req->error_code = (int)GetLastError();
+    if (err == ERROR_HANDLE_EOF) {
+        /* Immediate EOF read (0 bytes). */
+        req->bytes_transferred = 0;
+        req->is_completed = 1;
+        req->error_code = 0;
+        return 0;
+    }
+
+    req->error_code = (int)err;
     expert_io_release(req);
     return -1;
 }
 
 int expert_io_wait(expert_io_context_t *ctx, expert_io_request_t *req, uint32_t timeout_ms) {
     if (!ctx || !req) return -1;
-    if (req->is_completed) return 0;
+    if (req->is_completed) {
+        expert_io_release(req);
+        return 0;
+    }
 
     OVERLAPPED *ov = (OVERLAPPED *)req->internal;
     if (!ov) return -1;
