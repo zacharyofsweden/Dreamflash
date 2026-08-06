@@ -33,7 +33,8 @@ POLICIES = {
 
 def evaluate_speculative_matrix(
     ssd_gbps: float = 6.0,
-    target_tokens: int = 200,
+    target_tokens: int = 512,
+    warmup_tokens: int = 512,
     vram_capacity: int = 339,
     host_capacity: int = 1744,
     policy: str = "lfu",
@@ -55,6 +56,7 @@ def evaluate_speculative_matrix(
     a(f"Cache: {vram_capacity:,} VRAM + {host_capacity:,} host experts "
       f"({(vram_capacity + host_capacity) / FLASH.total_routed_experts * 100:.1f}% of model)")
     a(f"Non-speculative cold baseline under the same cost model: {baseline:.2f} tok/s")
+    a(f"Measured over {target_tokens} accepted tokens after a {warmup_tokens}-token warm-up")
     a("ASSUMED -- NOT MEASURED. Every bandwidth above is a placeholder; the expert")
     a("access stream is synthetic. See the caveats below the table.")
     a("=" * 96)
@@ -80,6 +82,7 @@ def evaluate_speculative_matrix(
                 target_token_count=target_tokens,
                 vram_capacity=vram_capacity,
                 host_capacity=host_capacity,
+                warmup_tokens=warmup_tokens,
             )
 
             tok_s = stats.accepted_tok_s
@@ -125,7 +128,10 @@ def evaluate_speculative_matrix(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ssd-gbps", type=float, default=6.0)
-    parser.add_argument("--target-tokens", type=int, default=200)
+    parser.add_argument("--target-tokens", type=int, default=512,
+        help="Measured accepted tokens (repo rule: a valid speed claim needs >=512)")
+    parser.add_argument("--warmup-tokens", type=int, default=512,
+        help="Tokens generated to warm the cache before measurement begins")
     parser.add_argument("--vram-gb", type=float, default=12.0)
     parser.add_argument("--ram-gb", type=float, default=16.0)
     parser.add_argument("--ctx", type=int, default=100_000)
@@ -167,6 +173,7 @@ def main() -> None:
         evaluate_speculative_matrix(
             ssd_gbps=args.ssd_gbps,
             target_tokens=args.target_tokens,
+            warmup_tokens=args.warmup_tokens,
             vram_capacity=vram_cap,
             host_capacity=host_cap,
             policy=args.policy,

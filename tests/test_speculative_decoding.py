@@ -27,7 +27,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         passes + accepted drafts exactly.
         """
         engine = SpeculativeEngine(draft_k=4, acceptance_prob=0.80, seed=123)
-        stats = engine.run_simulation(target_token_count=50)
+        stats = engine.run_simulation(target_token_count=50, warmup_tokens=0)
 
         self.assertLessEqual(stats.accepted_draft_tokens, stats.total_draft_tokens)
         self.assertEqual(
@@ -44,7 +44,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         exactly one candidate and yield exactly one token.
         """
         engine = SpeculativeEngine(draft_k=6, acceptance_prob=0.0, seed=7)
-        stats = engine.run_simulation(target_token_count=20)
+        stats = engine.run_simulation(target_token_count=20, warmup_tokens=0)
 
         self.assertEqual(stats.accepted_draft_tokens, 0)
         self.assertEqual(stats.total_draft_tokens, stats.target_verification_passes)
@@ -61,14 +61,14 @@ class TestSpeculativeDecoding(unittest.TestCase):
         engine = SpeculativeEngine(draft_k=4, acceptance_prob=0.7, seed=11)
 
         none = engine.run_simulation(
-            target_token_count=40, vram_capacity=0, host_capacity=0
+            target_token_count=40, warmup_tokens=0, vram_capacity=0, host_capacity=0
         )
         self.assertEqual(none.cache_hit_rate, 0.0, "no capacity can serve no hits")
         self.assertEqual(none.vram_experts, 0)
         self.assertEqual(none.host_experts, 0)
 
         big = SpeculativeEngine(draft_k=4, acceptance_prob=0.7, seed=11).run_simulation(
-            target_token_count=40, vram_capacity=2000, host_capacity=4000
+            target_token_count=40, warmup_tokens=0, vram_capacity=2000, host_capacity=4000
         )
         self.assertGreater(big.cache_hit_rate, 0.3, "a large cache must actually hit")
         self.assertGreater(
@@ -89,7 +89,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
             draft_k=5, acceptance_prob=1.0, expert_locality_overlap=1.0, seed=42
         )
         stats = engine.run_simulation(
-            target_token_count=60, vram_capacity=0, host_capacity=0
+            target_token_count=60, warmup_tokens=0, vram_capacity=0, host_capacity=0
         )
 
         served = stats.vram_experts + stats.host_experts + stats.ssd_experts
@@ -115,7 +115,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         cost = CostModel()
         engine = SpeculativeEngine(draft_k=4, acceptance_prob=0.9, seed=5, cost_model=cost)
         stats = engine.run_simulation(
-            target_token_count=60, vram_capacity=20000, host_capacity=20000
+            target_token_count=60, warmup_tokens=0, vram_capacity=20000, host_capacity=20000
         )
 
         # A cache larger than the model can still take compulsory first-touch misses,
@@ -125,7 +125,12 @@ class TestSpeculativeDecoding(unittest.TestCase):
             FLASH.total_routed_experts,
             "an oversized cache can only take compulsory misses, never capacity misses",
         )
-        ceiling = cost.vram_bps / cost.nonrouted_bytes
+        # The non-routed weights are read once per PASS, and a pass emits several
+        # accepted tokens -- amortizing that read is precisely what speculation buys.
+        # So the ceiling is per-pass, scaled by tokens per pass, not a flat tok/s.
+        passes_per_sec = cost.vram_bps / cost.nonrouted_bytes
+        tokens_per_pass = stats.total_generated_tokens / stats.target_verification_passes
+        ceiling = passes_per_sec * tokens_per_pass
         self.assertLess(
             stats.accepted_tok_s,
             ceiling,
@@ -146,10 +151,10 @@ class TestSpeculativeDecoding(unittest.TestCase):
 
         slow = SpeculativeEngine(
             draft_k=4, acceptance_prob=0.8, seed=31, cost_model=slow_cm
-        ).run_simulation(target_token_count=40)
+        ).run_simulation(target_token_count=40, warmup_tokens=0)
         fast = SpeculativeEngine(
             draft_k=4, acceptance_prob=0.8, seed=31, cost_model=fast_cm
-        ).run_simulation(target_token_count=40)
+        ).run_simulation(target_token_count=40, warmup_tokens=0)
 
         self.assertGreater(
             fast.accepted_tok_s,
@@ -164,7 +169,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
         wide = SpeculativeEngine(
             draft_k=4, acceptance_prob=0.8, seed=31,
             cost_model=CostModel(ssd_read_bps=600.0e9, pcie_bps=240.0e9),
-        ).run_simulation(target_token_count=40)
+        ).run_simulation(target_token_count=40, warmup_tokens=0)
         self.assertGreater(
             wide.accepted_tok_s,
             fast.accepted_tok_s,
@@ -174,7 +179,7 @@ class TestSpeculativeDecoding(unittest.TestCase):
     def test_serialized_never_beats_ideal_overlap(self) -> None:
         """The reported range must be ordered: serialized is the pessimistic end."""
         engine = SpeculativeEngine(draft_k=3, acceptance_prob=0.7, seed=17)
-        stats = engine.run_simulation(target_token_count=40)
+        stats = engine.run_simulation(target_token_count=40, warmup_tokens=0)
 
         self.assertGreater(stats.ideal_seconds, 0.0)
         self.assertGreaterEqual(stats.serialized_seconds, stats.ideal_seconds)
@@ -189,12 +194,12 @@ class TestSpeculativeDecoding(unittest.TestCase):
         cheap = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.7, seed=3,
             cost_model=CostModel(draft_model_bytes=1e6),
-        ).run_simulation(target_token_count=40)
+        ).run_simulation(target_token_count=40, warmup_tokens=0)
 
         pricey = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.7, seed=3,
             cost_model=CostModel(draft_model_bytes=8.0 * 1024**3),
-        ).run_simulation(target_token_count=40)
+        ).run_simulation(target_token_count=40, warmup_tokens=0)
 
         self.assertLess(
             pricey.accepted_tok_s,
@@ -213,11 +218,11 @@ class TestSpeculativeDecoding(unittest.TestCase):
         serial = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.85, seed=92,
             cost_model=CostModel(pipeline_transfer=False),
-        ).run_simulation(target_token_count=60)
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
         piped = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.85, seed=92,
             cost_model=CostModel(pipeline_transfer=True),
-        ).run_simulation(target_token_count=60)
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
 
         self.assertGreater(piped.accepted_tok_s, serial.accepted_tok_s)
         # Residency must be identical -- pipelining is a scheduling change, not a
@@ -234,11 +239,11 @@ class TestSpeculativeDecoding(unittest.TestCase):
         """
         lru = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.85, seed=92, policy_factory=LRUPolicy
-        ).run_simulation(target_token_count=60)
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
         admit = SpeculativeEngine(
             draft_k=5, acceptance_prob=0.85, seed=92,
             policy_factory=lambda: TinyLFUAdmissionPolicy(LFUPolicy()),
-        ).run_simulation(target_token_count=60)
+        ).run_simulation(target_token_count=60, warmup_tokens=0)
 
         self.assertGreater(
             admit.vram_experts,
@@ -258,7 +263,43 @@ class TestSpeculativeDecoding(unittest.TestCase):
             draft_k=5, acceptance_prob=0.85, seed=92, policy_factory=BeladyPolicy
         )
         with self.assertRaises(RuntimeError):
-            engine.run_simulation(target_token_count=40, vram_capacity=10, host_capacity=10)
+            engine.run_simulation(target_token_count=40, warmup_tokens=0, vram_capacity=10, host_capacity=10)
+
+    def test_warmup_excluded_from_measurement(self) -> None:
+        """Warm-up tokens must drive the cache but contribute nothing to the stats.
+
+        The regression this guards: with no warm-up the measurement is dominated by
+        compulsory first-touch misses -- the model has 11,008 routed experts and one
+        pass touches ~700, so a short run mostly measures a cold cache. Steady state
+        is ~42% hit / 14.0 tok/s against ~36% / 12.4 cold, so reporting the cold
+        figure understates by around 11%.
+        """
+        cold = SpeculativeEngine(
+            draft_k=8, acceptance_prob=0.85, seed=92,
+        ).run_simulation(target_token_count=200, warmup_tokens=0)
+        warm = SpeculativeEngine(
+            draft_k=8, acceptance_prob=0.85, seed=92,
+        ).run_simulation(target_token_count=200, warmup_tokens=600)
+
+        # Only the measured window is counted, so token totals match regardless.
+        self.assertGreaterEqual(cold.total_generated_tokens, 200)
+        self.assertGreaterEqual(warm.total_generated_tokens, 200)
+        self.assertLess(warm.total_generated_tokens, 260, "warm-up must not be counted")
+        # A warmed cache must hit more than a cold one.
+        self.assertGreater(
+            warm.cache_hit_rate,
+            cold.cache_hit_rate,
+            "warm-up should raise the measured hit rate above the cold-start figure",
+        )
+
+    def test_default_run_length_meets_the_repo_rule(self) -> None:
+        """The repo requires >=512 generated tokens for a valid speed claim."""
+        stats = SpeculativeEngine(draft_k=4, acceptance_prob=0.8, seed=1).run_simulation()
+        self.assertGreaterEqual(
+            stats.total_generated_tokens,
+            512,
+            "default run must satisfy the repo's own >=512-token measurement rule",
+        )
 
     def test_speculative_policy_pinning(self) -> None:
         """Test that SpeculativeAwarePolicy pins predicted draft candidate experts."""
@@ -281,11 +322,11 @@ class TestSpeculativeDecoding(unittest.TestCase):
         """Higher draft acceptance should increase accepted tok/s."""
         stats_low = SpeculativeEngine(
             draft_k=4, acceptance_prob=0.40, seed=999
-        ).run_simulation(target_token_count=100)
+        ).run_simulation(target_token_count=100, warmup_tokens=0)
 
         stats_high = SpeculativeEngine(
             draft_k=4, acceptance_prob=0.85, seed=999
-        ).run_simulation(target_token_count=100)
+        ).run_simulation(target_token_count=100, warmup_tokens=0)
 
         self.assertGreater(
             stats_high.accepted_tok_s,

@@ -46,8 +46,11 @@ backed by `file:line` citations into upstream in `docs/FINDINGS.md`.
    box, PCIe binds and the SSD stops mattering — see "Reaching 30 tok/s" below.
 4. **Cold-cache ceiling is 3.29 tok/s.** Milestones M4 (1) and M5 (3) need no
    cache at all. M6+ is *purely* a cache-hit-rate problem.
-5. **The best hardware upgrade is a faster/second NVMe, not a bigger GPU.**
-   Doubling SSD bandwidth drops the required hit rate from 67% to ~34%.
+5. **The best hardware upgrade is more host RAM — then a second NVMe, and only
+   then a bigger GPU.** Doubling SSD bandwidth drops the required hit rate from
+   67% to ~34%. But host RAM is cheaper per tok/s than either: it removes SSD
+   traffic outright rather than making it faster, and once RAM is at 64 GB a
+   second NVMe adds nothing at all. See "Beyond 13" below.
 
 Every one of the above depends on the assumed quantization (IQ2_XXS gate/up +
 Q2_K down, ~2.25 bpw). At Q4_K throughout, the cold-cache ceiling halves to
@@ -309,7 +312,46 @@ Not pursued, and why: a more aggressive quant cuts SSD and PCIe proportionally
 and is by far the largest remaining lever, but it trades against quality and the
 rules below bar it from counting in the default path. Reclaiming VRAM from the
 `kv_bytes_per_token` placeholder could enlarge the VRAM tier, but that number is
-a guess — measure it before spending it.
+a guess — measure it before spending it. (It is also worth little: dropping
+context to 8K only moves the VRAM tier 339 → 599 experts and buys 0.3 tok/s.)
+
+### Beyond 13: host RAM is the cheap lever, not the GPU
+
+**Correction to the table above.** That "what reaches 30" list was computed
+without pipelining and without considering a RAM upgrade, and it is misleading as
+a result. It is far cheaper than it suggests. Measured at steady state
+(512-token warm-up), K=8, pipelined:
+
+| Configuration | serial | ideal | hit% | cost |
+|---|---:|---:|---:|---|
+| Stock box | 14.47 | 15.82 | 40.9% | — |
+| **32 GB RAM** | **20.15** | 22.87 | 59.1% | ~$60 |
+| **64 GB RAM** | **38.20** | 49.29 | 90.1% | ~$150 |
+| 2nd NVMe RAID0 | 26.67 | 31.63 | 40.9% | ~$120 |
+| 2nd NVMe + 64 GB RAM | 38.20 | 49.29 | 90.1% | ~$270 |
+
+Host RAM is the cheapest tok/s in the system, and by a wide margin — it removes
+SSD traffic outright rather than making it faster. Note the last row: once RAM is
+at 64 GB the second NVMe adds *nothing*, because at a 90% hit rate the SSD is
+barely on the critical path. **Buy RAM before NVMe, and NVMe before GPU.**
+
+**How much of this survives the assumptions** — the part that matters:
+
+| `zipf_s` | 16 GB | 32 GB | 64 GB |
+|---:|---:|---:|---:|
+| 0.8 | 12.14 | 16.97 | 33.69 |
+| 1.0 | 12.60 | 17.61 | 33.52 |
+| 1.2 (default) | 14.47 | **20.15** | 38.20 |
+| 1.4 | 15.01 | 21.01 | 38.54 |
+
+**"32 GB reaches 20" is not robust** — it holds only at the default skew and
+above; at `s=0.8`–`1.0` it lands at ~17. **"64 GB reaches 30+" is robust**, since
+a 64 GB host tier holds enough of the model that skew stops mattering.
+
+And both require pipelining, which is **not implemented**. Without it, 32 GB RAM
+gives 12–15 tok/s across the whole skew range. The order of work is therefore:
+build the double-buffered streaming path first, then buy RAM. Buying RAM without
+the streaming path buys almost nothing.
 
 ## Rules that are not negotiable
 
