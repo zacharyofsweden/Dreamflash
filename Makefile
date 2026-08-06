@@ -6,7 +6,9 @@
 
 ROCM_PATH ?= /opt/rocm
 HIPCC     ?= $(ROCM_PATH)/bin/hipcc
-PYTHON    ?= python
+PYTHON    ?= python3
+CC        ?= cc
+BUILD_DIR ?= build
 
 # Hardware target axes
 ARCH        ?= gfx1100
@@ -20,7 +22,11 @@ else
     CXXFLAGS += -DDS4_UNIFIED_MEMORY=1 -DDS4_FREE_RESERVE_GIB=16.0
 endif
 
-.PHONY: all test test-roofline test-trace check-env rocm-discrete strix-halo clean
+# The C engine is plain C11 and builds without ROCm.
+CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Iinclude
+
+.PHONY: all test test-roofline test-trace test-spec test-config test-c \
+        check-env rocm-discrete strix-halo clean
 
 all: test
 
@@ -31,13 +37,29 @@ check-env:
 	@echo "MEMORY MODE : $(MEMORY_MODE)"
 	@echo "PYTHON      : $(PYTHON)"
 
-test: test-roofline test-trace
+test: test-roofline test-trace test-spec test-config test-c
 
 test-roofline:
 	$(PYTHON) tests/test_roofline.py
 
 test-trace:
 	$(PYTHON) tests/test_trace_replay.py
+
+test-spec:
+	$(PYTHON) tests/test_speculative_decoding.py
+
+test-config:
+	$(PYTHON) tests/test_discrete_config.py
+
+# Builds and exercises the C engine. Previously nothing in this repo called into
+# src/*.c at all, so it could regress freely without any target noticing.
+test-c: $(BUILD_DIR)/test_expert_io
+	./$(BUILD_DIR)/test_expert_io
+
+$(BUILD_DIR)/test_expert_io: tests/test_expert_io.c src/expert_io.c src/memory_manager.c \
+                             include/expert_io.h include/memory_manager.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) tests/test_expert_io.c src/expert_io.c src/memory_manager.c -o $@
 
 rocm-discrete:
 	@echo "Building Dreamflash ROCm discrete target for $(ARCH)..."
@@ -51,3 +73,4 @@ strix-halo:
 
 clean:
 	@echo "Cleaning temporary build artifacts..."
+	rm -rf $(BUILD_DIR)

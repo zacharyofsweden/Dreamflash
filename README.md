@@ -18,10 +18,9 @@ work plan that makes that tractable — and honest about where it stops.
 ## Start here
 
 ```bash
+make                                   # every test suite, Python and C
 python tools/roofline/roofline.py      # the feasibility math
-python tests/test_roofline.py          # 15 consistency tests
 python tools/trace_replay/replay.py    # offline simulator policy comparison
-python tests/test_trace_replay.py      # 7 trace replay unit tests
 ```
 
 Then read **[docs/FINDINGS.md](docs/FINDINGS.md)**. It is the highest-value
@@ -142,8 +141,11 @@ machine; the rest can be done anywhere.
 
 ### Phase 3 — the streaming path
 
-- [ ] `ExpertIOBackend` interface + `io_uring` backend + `pread` fallback.
-      This is new code; nothing upstream to extend.
+- [~] `ExpertIOBackend` interface + `pread` backend (`src/expert_io.c`), with
+      O_DIRECT, alignment enforcement, short-read reporting, and a Win32
+      overlapped backend. **`io_uring` is still missing** — requesting it
+      downgrades to `pread`, and `expert_io_backend_in_use()` reports the
+      downgrade rather than letting a caller assume async.
 - [ ] Three-tier memory manager (VRAM / pinned host RAM / SSD) with the byte
       budget from `plan_budget()`. Non-routed weights are VRAM-pinned and
       non-negotiable — they are touched every layer, every token.
@@ -213,11 +215,28 @@ tools/roofline/roofline.py     feasibility calculator
 tools/trace_replay/            offline trace simulator & replacement policies
 tools/discrete_config/         discrete GPU runtime config generator
 tools/speculative_decoding/    speculative decoding & MoE candidate verification engine
+src/expert_io.c                pread/Win32 expert read engine (no io_uring yet)
+src/memory_manager.c           VRAM/host residency tracker (slot counts, not bytes)
 tests/test_roofline.py         15 roofline consistency tests
 tests/test_trace_replay.py      7 trace replay unit tests
 tests/test_discrete_config.py  2 discrete configuration tests
 tests/test_speculative_decoding.py 4 speculative decoding unit tests
+tests/test_expert_io.c         40 checks over the C engine (`make test-c`)
 ```
+
+## Tooling caveats worth knowing before you trust output
+
+- `tools/hardware_probe/pcie_probe.py` requires a real HIP/CUDA device and exits
+  non-zero when there isn't one. It has no simulation mode by design — the
+  previous version reported a host-to-host `bytearray` slice as PCIe bandwidth.
+- `tools/hardware_probe/ssd_probe.py` defaults to a 4 GB probe file and drops the
+  page cache between runs. It reports cold *and* warm, and sets
+  `trustworthy: false` in its JSON (plus a non-zero exit) if the two are within
+  10% on buffered I/O, which means eviction did not work.
+- `tools/download_chunked.py` refuses to append to a partial file unless the
+  server returns 206 with a matching `Content-Range`. A server that ignores
+  `Range` would otherwise append a second full copy and silently corrupt the file.
+- Neither downloader verifies checksums. Size is not integrity.
 
 Everything else in the brief's deliverable list is still to be created; the
 work plan above is the order to create it in.

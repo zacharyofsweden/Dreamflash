@@ -3,3 +3,6 @@ __pycache__/
 results/**/*.gguf
 gguf/
 .venv/
+build/
+*.o
+test_probe.bin

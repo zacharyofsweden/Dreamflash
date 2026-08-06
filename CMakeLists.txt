@@ -16,5 +16,12 @@ add_library(dreamflash_core STATIC ${DREAMFLASH_SOURCES})
 if(WIN32)
     message(STATUS "Building Dreamflash Core for Windows (Win32 Overlapped IO)")
 else()
-    message(STATUS "Building Dreamflash Core for Linux / WSL2 (POSIX / io_uring)")
+    # io_uring is not implemented; the POSIX backend is synchronous pread.
+    message(STATUS "Building Dreamflash Core for Linux / WSL2 (POSIX pread, synchronous)")
 endif()
+
+# The C engine had no caller of any kind until this target existed.
+enable_testing()
+add_executable(test_expert_io tests/test_expert_io.c)
+target_link_libraries(test_expert_io PRIVATE dreamflash_core)
+add_test(NAME expert_io COMMAND test_expert_io)

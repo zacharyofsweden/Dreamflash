@@ -1,7 +1,9 @@
-"""Model downloader and integrity verification tool for DeepSeek-V4 Flash GGUF files.
+"""Pre-download disk-space check and post-download size check for DS4-Flash GGUF files.
 
-Calculates required disk space, checks available drive capacity, verifies block structures,
-and supports resuming downloads from official Hugging Face repositories.
+This tool does NOT download anything -- it prints the huggingface-cli command to
+run. It does not verify checksums or parse GGUF block structures either; the
+"verify" step is a file-size comparison only. For an actual chunked download with
+validated resume, use tools/download_chunked.py.
 """
 
 from __future__ import annotations
@@ -9,12 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import urllib.request
 from pathlib import Path
-
-# Add roofline model path
-sys.path.insert(0, str(Path(__file__).resolve().parent / "roofline"))
-from model import FLASH
 
 # Default Hugging Face repository and file manifest for DeepSeek-V4 Flash GGUF
 DEFAULT_HF_REPO = "antirez/deepseek-v4-gguf"
@@ -37,10 +34,25 @@ def check_disk_space(target_dir: Path, required_bytes: int) -> bool:
     else:
         # Windows
         import ctypes
+        from ctypes import wintypes
+
         free_bytes_ct = ctypes.c_ulonglong(0)
-        ctypes.windll.kernel32.GetDiskFreeSpaceExW(
-            str(target_dir), None, None, ctypes.byref(free_bytes_ct)
-        )
+        fn = ctypes.windll.kernel32.GetDiskFreeSpaceExW
+        fn.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_ulonglong),
+            ctypes.POINTER(ctypes.c_ulonglong),
+            ctypes.POINTER(ctypes.c_ulonglong),
+        ]
+        fn.restype = wintypes.BOOL
+        if not fn(str(target_dir), None, None, ctypes.byref(free_bytes_ct)):
+            err = ctypes.get_last_error()
+            print(
+                f"[-] ERROR: GetDiskFreeSpaceExW failed for {target_dir} (error {err}); "
+                f"cannot determine free space.",
+                file=sys.stderr,
+            )
+            return False
         free_bytes = free_bytes_ct.value
 
     free_gb = free_bytes / (1024**3)
@@ -56,7 +68,13 @@ def check_disk_space(target_dir: Path, required_bytes: int) -> bool:
 
 
 def verify_downloaded_files(output_dir: Path) -> bool:
-    """Verify downloaded GGUF files exist and match size specifications."""
+    """Check that the GGUF files exist and are the expected size.
+
+    This is a SIZE check, not an integrity check. There is no checksum in
+    MODEL_FILES to verify against, so this cannot detect a file that is the
+    right length but wrong content. Verify the published checksum by hand
+    before trusting a download.
+    """
     all_valid = True
     print("\n=== Verifying Model Files ===")
     for key, spec in MODEL_FILES.items():
@@ -70,14 +88,20 @@ def verify_downloaded_files(output_dir: Path) -> bool:
         size_gb = size / (1024**3)
         expected_gb = spec["expected_bytes"] / (1024**3)
 
-        if abs(size - spec["expected_bytes"]) < 100_000_000:
-            print(f"[+] Valid file   : {spec['filename']} ({size_gb:.2f} GB)")
+        if size == spec["expected_bytes"]:
+            print(f"[+] Correct size : {spec['filename']} ({size_gb:.2f} GB)")
         else:
-            print(f"[!] Warning file : {spec['filename']} size mismatch (Found {size_gb:.2f} GB, expected ~{expected_gb:.2f} GB)")
+            delta = size - spec["expected_bytes"]
+            print(
+                f"[-] SIZE MISMATCH: {spec['filename']} is {size:,} bytes, "
+                f"expected {spec['expected_bytes']:,} ({delta:+,}); "
+                f"{size_gb:.2f} GB vs {expected_gb:.2f} GB"
+            )
+            all_valid = False
     return all_valid
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=str, default="models", help="Directory to store model weights")
     parser.add_argument("--verify-only", action="store_true", help="Only verify existing files without downloading")
@@ -93,16 +117,17 @@ def main() -> None:
     space_ok = check_disk_space(out_p, total_required_bytes)
 
     if args.verify_only:
-        verify_downloaded_files(out_p)
-        return
+        return 0 if verify_downloaded_files(out_p) else 1
 
     if not space_ok:
         print("\n[!] Please free up space on your drive before downloading.")
-        return
+        return 1
 
-    print("\n[+] Setup check complete. You can download the model GGUF split files using:")
+    print("\n[+] Setup check complete. This tool does not download; run either:")
     print(f"    huggingface-cli download {DEFAULT_HF_REPO} --local-dir {out_p}")
+    print(f"    python tools/download_chunked.py --target-dir {out_p}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
