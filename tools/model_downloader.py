@@ -17,17 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "roofline"))
 from model import FLASH
 
 # Default Hugging Face repository and file manifest for DeepSeek-V4 Flash GGUF
-DEFAULT_HF_REPO = "deepseek-ai/DeepSeek-V4-Flash-GGUF"
+DEFAULT_HF_REPO = "antirez/deepseek-v4-gguf"
 MODEL_FILES = {
-    "non_routed_q8": {
-        "filename": "ds4_flash_non_routed_q8_0.gguf",
-        "expected_bytes": 7_400_000_000,
-        "description": "Non-routed weights (Attention, Embeddings, Shared Experts, Norms)",
-    },
-    "experts_iq2_xxs_q2_k": {
-        "filename": "ds4_flash_experts_iq2_xxs_q2_k.gguf",
-        "expected_bytes": 77_900_000_000,
-        "description": "Routed experts (IQ2_XXS gate/up + Q2_K down)",
+    "flash_gguf": {
+        "filename": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+        "expected_bytes": 86_720_111_488,
+        "description": "DeepSeek-V4-Flash IQ2_XXS / Q2_K mixed quant GGUF (ds4 native)",
     },
 }
 
