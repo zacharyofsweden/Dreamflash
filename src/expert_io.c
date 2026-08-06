@@ -164,6 +164,7 @@ int expert_io_submit(expert_io_context_t *ctx, expert_io_request_t *req) {
         /* Completed synchronously. */
         req->bytes_transferred = (size_t)immediate;
         req->is_completed = 1;
+        expert_io_release(req);
         return 0;
     }
 
@@ -178,6 +179,7 @@ int expert_io_submit(expert_io_context_t *ctx, expert_io_request_t *req) {
         req->bytes_transferred = 0;
         req->is_completed = 1;
         req->error_code = 0;
+        expert_io_release(req);
         return 0;
     }
 
