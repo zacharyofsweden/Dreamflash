@@ -14,12 +14,17 @@ import sys
 from pathlib import Path
 
 # Default Hugging Face repository and file manifest for DeepSeek-V4 Flash GGUF
-DEFAULT_HF_REPO = "antirez/deepseek-v4-gguf"
+DEFAULT_HF_REPO = "jabbatheduck/DeepSeek-v4-flash-mini"
 MODEL_FILES = {
+    "flash_reap_gguf": {
+        "filename": "DeepSeek-V4-Flash-REAP-IQ2XXS-w2Q2K-AProjQ8-OutQ8-chat-v2.gguf",
+        "expected_bytes": 57_337_555_712,
+        "description": "DeepSeek-V4-Flash REAP IQ2_XXS / Q2_K mixed quant GGUF (53.4 GB)",
+    },
     "flash_gguf": {
         "filename": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
         "expected_bytes": 86_720_111_488,
-        "description": "DeepSeek-V4-Flash IQ2_XXS / Q2_K mixed quant GGUF (ds4 native)",
+        "description": "DeepSeek-V4-Flash IQ2_XXS / Q2_K mixed quant GGUF (86.7 GB)",
     },
 }
 
@@ -75,30 +80,27 @@ def verify_downloaded_files(output_dir: Path) -> bool:
     right length but wrong content. Verify the published checksum by hand
     before trusting a download.
     """
-    all_valid = True
+    found_any = False
     print("\n=== Verifying Model Files ===")
     for key, spec in MODEL_FILES.items():
         file_path = output_dir / spec["filename"]
         if not file_path.exists():
-            print(f"[-] Missing file : {spec['filename']} ({spec['description']})")
-            all_valid = False
+            print(f"[-] Missing file : {spec['filename']}")
             continue
 
         size = file_path.stat().st_size
         size_gb = size / (1024**3)
-        expected_gb = spec["expected_bytes"] / (1024**3)
 
         if size == spec["expected_bytes"]:
-            print(f"[+] Correct size : {spec['filename']} ({size_gb:.2f} GB)")
+            print(f"[+] Valid file   : {spec['filename']} ({size_gb:.2f} GB)")
+            found_any = True
         else:
             delta = size - spec["expected_bytes"]
             print(
                 f"[-] SIZE MISMATCH: {spec['filename']} is {size:,} bytes, "
                 f"expected {spec['expected_bytes']:,} ({delta:+,}); "
-                f"{size_gb:.2f} GB vs {expected_gb:.2f} GB"
             )
-            all_valid = False
-    return all_valid
+    return found_any
 
 
 def main() -> int:

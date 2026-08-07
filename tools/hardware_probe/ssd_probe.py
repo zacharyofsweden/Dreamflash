@@ -114,7 +114,15 @@ def probe_ssd(
 
             t0 = time.perf_counter()
             try:
-                got = os.preadv(fd, [buf], offset)
+                if hasattr(os, "preadv"):
+                    got = os.preadv(fd, [buf], offset)
+                elif hasattr(os, "pread"):
+                    data = os.pread(fd, block_size, offset)
+                    got = len(data)
+                else:
+                    os.lseek(fd, offset, os.SEEK_SET)
+                    data = os.read(fd, block_size)
+                    got = len(data)
             except OSError as e:
                 if direct_used:
                     # Fall back to buffered rather than dying mid-run, and say so.
