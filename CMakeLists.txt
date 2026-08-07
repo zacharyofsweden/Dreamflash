@@ -9,6 +9,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(DREAMFLASH_SOURCES
     src/expert_io.c
     src/memory_manager.c
+    src/pipelined_loader.c
 )
 
 add_library(dreamflash_core STATIC ${DREAMFLASH_SOURCES})
