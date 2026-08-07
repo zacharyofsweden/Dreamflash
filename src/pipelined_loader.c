@@ -56,6 +56,7 @@ int pipelined_loader_prefetch_next(
 ) {
     if (!loader) return -1;
     if (length_bytes > loader->slot_capacity) return -1;
+    if (loader->has_inflight) return -1;
 
     // Check if expert is already in VRAM or RAM cache
     ds4_cache_hit_tier_t tier = ds4_memory_manager_lookup(loader->mem_mgr, next_key, 0);
@@ -75,9 +76,14 @@ int pipelined_loader_prefetch_next(
     loader->req_inflight.destination_buffer = target_staging;
 
     loader->current_key = next_key;
-    loader->has_inflight = 1;
 
-    return expert_io_submit(loader->io_ctx, &loader->req_inflight);
+    int rc = expert_io_submit(loader->io_ctx, &loader->req_inflight);
+    if (rc == 0) {
+        loader->has_inflight = 1;
+    } else {
+        loader->has_inflight = 0;
+    }
+    return rc;
 }
 
 int pipelined_loader_commit_current(pipelined_loader_t *loader, uint64_t step) {
@@ -95,6 +101,10 @@ int pipelined_loader_commit_current(pipelined_loader_t *loader, uint64_t step) {
 
 void pipelined_loader_free(pipelined_loader_t *loader) {
     if (!loader) return;
+    if (loader->has_inflight) {
+        expert_io_wait(loader->io_ctx, &loader->req_inflight, 2000);
+        loader->has_inflight = 0;
+    }
     if (loader->buffer_A) expert_io_free_aligned(loader->buffer_A);
     if (loader->buffer_B) expert_io_free_aligned(loader->buffer_B);
     free(loader);
