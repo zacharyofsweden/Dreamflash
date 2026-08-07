@@ -333,6 +333,15 @@ class DreamflashHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
 
+            if llm_instance is None:
+                # Model is still loading into memory
+                msg = "[Loading 53.4 GB model weights into memory... Please wait 30s and try again]\n"
+                sse_data = f"data: {json.dumps({'token': msg})}\n\n"
+                self.wfile.write(sse_data.encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
             llm = init_model()
 
             formatted_prompt = f"<｜User｜>{prompt}<｜Assistant｜>"
@@ -367,15 +376,23 @@ def main() -> None:
     print(" DREAMFLASH STREAMING WEB CHAT SERVER")
     print("==================================================================")
     print(f"[+] Binding strictly to: http://{host}:{port}")
-    print("[+] Loading model weights in background...")
 
-    try:
-        init_model()
-    except Exception as e:
-        print(f"[-] Failed to load model: {e}", file=sys.stderr)
-        return
-
+    # Bind HTTP server immediately so port 8080 is accessible without delay
     server = HTTPServer((host, port), DreamflashHTTPRequestHandler)
+
+    # Start model initialization in a background thread
+    import threading
+    def async_load():
+        print("[+] Loading model weights in background thread...")
+        try:
+            init_model()
+            print("\n[+] MODEL LOADED & READY FOR INFERENCE!")
+        except Exception as e:
+            print(f"[-] Model loading error: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=async_load, daemon=True)
+    t.start()
+
     print(f"\n[+] SERVER READY! Open http://{host}:{port} in your browser to talk to DeepSeek-V4 Flash.")
     print("[+] Press Ctrl+C to stop server.\n")
 
